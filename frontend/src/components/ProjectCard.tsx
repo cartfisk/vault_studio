@@ -380,7 +380,6 @@ export default function ProjectCard({
         },
         projectTracks,
         true,
-        false,
         queueTracks,
       );
     }

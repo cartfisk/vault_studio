@@ -57,8 +57,6 @@ export default function MusicPlayer({
     onProgressUpdate,
     onEnded,
     audioPlayerRef,
-    getPreloadedAudio,
-    clearPreloadedAudio,
     shareToken,
     sharePassword,
   } = useAudioPlayer();
@@ -466,11 +464,6 @@ export default function MusicPlayer({
     const newSrc = audioUrl;
 
     if (currentSrc !== newSrc) {
-      const preloadedAudio = getPreloadedAudio();
-      if (preloadedAudio && preloadedAudio.src === audioUrl) {
-        clearPreloadedAudio();
-      }
-
       audio.src = audioUrl;
       audio.volume = volumePercentage / 100;
       audio.load();
@@ -501,7 +494,7 @@ export default function MusicPlayer({
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioUrl, getPreloadedAudio, clearPreloadedAudio]);
+  }, [audioUrl]);
 
   useEffect(() => {
     if (!audioRef.current) return;

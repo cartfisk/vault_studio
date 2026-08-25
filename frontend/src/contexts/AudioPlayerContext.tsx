@@ -56,7 +56,6 @@ interface AudioPlayerContextType {
     track: Track,
     projectTracks?: Track[],
     autoPlay?: boolean,
-    forceReload?: boolean,
     queue?: Track[],
   ) => void;
   pause: () => void;
@@ -81,8 +80,6 @@ interface AudioPlayerContextType {
   onProgressUpdate: (progress: number) => void;
   onEnded: () => void;
   audioPlayerRef: React.RefObject<any>;
-  getPreloadedAudio: () => HTMLAudioElement | null;
-  clearPreloadedAudio: () => void;
   shareToken: string | null;
   sharePassword: string;
   setShareToken: (token: string | null, password?: string) => void;
@@ -124,10 +121,7 @@ export function AudioPlayerProvider({
     [],
   );
   const audioPlayerRef = useRef<any>(null);
-  const preloadedTrackIdRef = useRef<string | null>(null);
-  const preloadAudioRef = useRef<HTMLAudioElement | null>(null);
   const playRequestIdRef = useRef(0);
-  const preloadRequestIdRef = useRef(0);
   const { preferences } = usePreferences();
   const qualityPreference = preferences?.default_quality || DEFAULT_AUDIO_QUALITY;
   const [shareTokenVersion, setShareTokenVersion] = useState(0);
@@ -260,184 +254,11 @@ export function AudioPlayerProvider({
     }
   }, [isShuffled, currentProjectTracks]);
 
-  const getNextTrack = useCallback((): Track | null => {
-    if (!currentTrack) return null;
-
-    if (queue.length > 0) {
-      return queue[0];
-    }
-
-    if (currentProjectTracks.length > 0) {
-      if (isShuffled && shuffledProjectTracks.length > 0) {
-        const currentIndex = shuffledProjectTracks.findIndex(
-          (t) => t.id === currentTrack.id,
-        );
-        if (
-          currentIndex !== -1 &&
-          currentIndex < shuffledProjectTracks.length - 1
-        ) {
-          return shuffledProjectTracks[currentIndex + 1];
-        }
-      } else {
-        const currentIndex = currentProjectTracks.findIndex(
-          (t) => t.id === currentTrack.id,
-        );
-        if (
-          currentIndex !== -1 &&
-          currentIndex < currentProjectTracks.length - 1
-        ) {
-          return currentProjectTracks[currentIndex + 1];
-        }
-      }
-    }
-
-    return null;
-  }, [
-    currentTrack,
-    queue,
-    currentProjectTracks,
-    shuffledProjectTracks,
-    isShuffled,
-  ]);
-
-  const preloadNextTrack = useCallback(() => {
-    const requestId = ++preloadRequestIdRef.current;
-    const nextTrack = getNextTrack();
-
-    if (!nextTrack) {
-      if (preloadAudioRef.current) {
-        preloadAudioRef.current.pause();
-        preloadAudioRef.current.src = "";
-        preloadAudioRef.current = null;
-      }
-      preloadedTrackIdRef.current = null;
-      return;
-    }
-
-    if (preloadedTrackIdRef.current === nextTrack.id) {
-      return;
-    }
-
-    (async () => {
-      const quality = qualityPreference;
-
-      const canPreload = !!shareTokenRef.current || isAuthenticated;
-      if (!canPreload) {
-        return;
-      }
-
-      try {
-        const preloadAudio = new Audio();
-        preloadAudio.preload = "auto";
-        preloadAudio.crossOrigin = "anonymous";
-
-        let streamUrl: string;
-
-        if (shareTokenRef.current) {
-          streamUrl = resolveApiUrl(
-            `/api/share/${shareTokenRef.current}/stream/${nextTrack.id}`,
-          );
-        } else {
-          const signed = await getStreamUrl(nextTrack.id, { quality });
-          streamUrl = resolveApiUrl(signed.url);
-        }
-
-        if (preloadRequestIdRef.current !== requestId) {
-          return;
-        }
-
-        const latestNextTrack = getNextTrack();
-        if (!latestNextTrack || latestNextTrack.id !== nextTrack.id) {
-          return;
-        }
-
-        if (preloadAudioRef.current) {
-          preloadAudioRef.current.pause();
-          preloadAudioRef.current.src = "";
-          preloadAudioRef.current = null;
-        }
-
-        preloadAudio.src = streamUrl;
-
-        preloadAudioRef.current = preloadAudio;
-        preloadedTrackIdRef.current = nextTrack.id;
-      } catch (error) {
-        console.error(
-          "[AudioPlayer] Failed to preload preferred quality:",
-          error,
-        );
-
-        if (preloadRequestIdRef.current !== requestId) {
-          return;
-        }
-
-        const latestNextTrack = getNextTrack();
-        if (!latestNextTrack || latestNextTrack.id !== nextTrack.id) {
-          return;
-        }
-
-        const preloadAudio = new Audio();
-        preloadAudio.preload = "auto";
-        preloadAudio.crossOrigin = "anonymous";
-
-        let streamUrl: string;
-
-        if (shareTokenRef.current) {
-          streamUrl = resolveApiUrl(
-            `/api/share/${shareTokenRef.current}/stream/${nextTrack.id}`,
-          );
-        } else {
-          const signed = await getStreamUrl(nextTrack.id, { quality });
-          streamUrl = resolveApiUrl(signed.url);
-        }
-
-        if (preloadAudioRef.current) {
-          preloadAudioRef.current.pause();
-          preloadAudioRef.current.src = "";
-          preloadAudioRef.current = null;
-        }
-
-        preloadAudio.src = streamUrl;
-        preloadAudioRef.current = preloadAudio;
-        preloadedTrackIdRef.current = nextTrack.id;
-      }
-    })();
-  }, [getNextTrack]);
-
-  useEffect(() => {
-    if (currentTrack && isPlaying) {
-      const timer = setTimeout(() => {
-        preloadNextTrack();
-      }, 500);
-      return () => clearTimeout(timer);
-    }
-  }, [
-    currentTrack,
-    queue,
-    currentProjectTracks,
-    shuffledProjectTracks,
-    isShuffled,
-    isPlaying,
-    preloadNextTrack,
-  ]);
-
-  useEffect(() => {
-    return () => {
-      if (preloadAudioRef.current) {
-        preloadAudioRef.current.pause();
-        preloadAudioRef.current.src = "";
-        preloadAudioRef.current = null;
-      }
-      preloadedTrackIdRef.current = null;
-    };
-  }, []);
-
   const play = useCallback(
     async (
       track: Track,
       projectTracks?: Track[],
       autoPlay: boolean = true,
-      forceReload: boolean = false,
       queueTracks?: Track[],
     ) => {
       const requestId = ++playRequestIdRef.current;
@@ -468,33 +289,6 @@ export function AudioPlayerProvider({
           setQueue(queueTracks);
         }
         cacheWaveforms(queueTracks);
-      }
-
-      const isPreloaded =
-        preloadedTrackIdRef.current === track.id && preloadAudioRef.current;
-
-      const preloadedStreamUrl =
-        isPreloaded && !forceReload ? preloadAudioRef.current?.src : null;
-
-      if (isPreloaded && !forceReload) {
-        preloadedTrackIdRef.current = null;
-        preloadAudioRef.current = null;
-      }
-
-      if (preloadedStreamUrl) {
-        setCurrentTrack(track);
-        setAudioUrl(preloadedStreamUrl);
-        setIsPlaying(autoPlay);
-
-        void ensureTrackWaveform(track).then((trackWithWaveform) => {
-          if (playRequestIdRef.current !== requestId) return;
-          setCurrentTrack((activeTrack) =>
-            activeTrack?.id === track.id ? trackWithWaveform : activeTrack,
-          );
-        });
-
-        setTimeout(() => preloadNextTrack(), 100);
-        return;
       }
 
       let trackToPlay = track;
@@ -529,10 +323,8 @@ export function AudioPlayerProvider({
 
       setAudioUrl(streamUrl);
       setIsPlaying(autoPlay);
-
-      setTimeout(() => preloadNextTrack(), 100);
     },
-    [preloadNextTrack, isShuffled, ensureTrackWaveform, cacheWaveforms],
+    [isShuffled, ensureTrackWaveform, cacheWaveforms],
   );
 
   const pause = useCallback(() => {
@@ -776,7 +568,7 @@ export function AudioPlayerProvider({
 
       if (!currentTrack) {
         const [firstTrack, ...rest] = tracks;
-        play(firstTrack, undefined, false, false, rest);
+        play(firstTrack, undefined, false, rest);
         return;
       }
 
@@ -819,15 +611,6 @@ export function AudioPlayerProvider({
     },
     [cacheWaveforms],
   );
-
-  const getPreloadedAudio = useCallback(() => {
-    return preloadAudioRef.current;
-  }, []);
-
-  const clearPreloadedAudio = useCallback(() => {
-    preloadedTrackIdRef.current = null;
-    preloadAudioRef.current = null;
-  }, []);
 
   const setShareToken = useCallback((token: string | null, password = "") => {
     shareTokenRef.current = token;
@@ -1060,13 +843,6 @@ export function AudioPlayerProvider({
         audioPlayerRef.current.audio.current.src = "";
       }
 
-      if (preloadAudioRef.current) {
-        preloadAudioRef.current.pause();
-        preloadAudioRef.current.src = "";
-        preloadAudioRef.current = null;
-      }
-      preloadedTrackIdRef.current = null;
-
       setCurrentTrack(null);
       setAudioUrl(null);
       setDuration(0);
@@ -1122,8 +898,6 @@ export function AudioPlayerProvider({
         onProgressUpdate,
         onEnded,
         audioPlayerRef,
-        getPreloadedAudio,
-        clearPreloadedAudio,
         shareToken,
         sharePassword,
         setShareToken,

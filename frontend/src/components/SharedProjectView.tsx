@@ -188,7 +188,6 @@ export default function SharedProjectView({
           projectTracks[0],
           projectTracks,
           true,
-          false,
           remainingTracks,
         );
       }
@@ -246,7 +245,6 @@ export default function SharedProjectView({
         projectTracks[0],
         projectTracks,
         true,
-        false,
         queueTracks,
       );
     }

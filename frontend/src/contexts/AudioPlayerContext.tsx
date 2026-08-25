@@ -20,6 +20,10 @@ import {
   NativeMediaSession,
   type NativeMediaActionEvent,
 } from "../lib/nativeMediaSession";
+import {
+  isPreloadStale,
+  shouldStartPreload,
+} from "../lib/gaplessPreload";
 
 interface Track {
   id: string;
@@ -43,6 +47,13 @@ interface Track {
 
 export type LoopMode = "off" | "track" | "project";
 
+export interface NextTrackPreload {
+  trackId: string;
+  url: string;
+  /** Date.now() at signing time, used to detect expiry before swap. */
+  signedAt: number;
+}
+
 interface AudioPlayerContextType {
   currentTrack: Track | null;
   isPlaying: boolean;
@@ -52,6 +63,7 @@ interface AudioPlayerContextType {
   currentProjectTracks: Track[];
   shuffledProjectTracks: Track[];
   audioUrl: string | null;
+  nextTrackPreload: NextTrackPreload | null;
   play: (
     track: Track,
     projectTracks?: Track[],
@@ -103,6 +115,15 @@ export function AudioPlayerProvider({
   const [duration, setDuration] = useState(0);
   const [previewProgress, setPreviewProgress] = useState(0);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [nextTrackPreload, setNextTrackPreload] =
+    useState<NextTrackPreload | null>(null);
+  /**
+   * `${currentTrackId}:${nextTrackId}:${quality}` for the preload currently in
+   * flight or published. Keyed on the tuple rather than a boolean so a queue
+   * reorder, shuffle toggle, or quality change re-arms the trigger instead of
+   * latching it off.
+   */
+  const preloadKeyRef = useRef<string | null>(null);
   const [loopMode, setLoopMode] = useState<LoopMode>("off");
   const [isShuffled, setIsShuffled] = useState(false);
   const shareTokenRef = useRef<string | null>(null);
@@ -835,6 +856,129 @@ export function AudioPlayerProvider({
     };
   }, [currentTrack, duration]);
 
+  const getNextTrack = useCallback((): Track | null => {
+    if (!currentTrack) return null;
+
+    if (queue.length > 0) {
+      return queue[0];
+    }
+
+    if (currentProjectTracks.length > 0) {
+      if (isShuffled && shuffledProjectTracks.length > 0) {
+        const currentIndex = shuffledProjectTracks.findIndex(
+          (t) => t.id === currentTrack.id,
+        );
+        if (
+          currentIndex !== -1 &&
+          currentIndex < shuffledProjectTracks.length - 1
+        ) {
+          return shuffledProjectTracks[currentIndex + 1];
+        }
+      } else {
+        const currentIndex = currentProjectTracks.findIndex(
+          (t) => t.id === currentTrack.id,
+        );
+        if (
+          currentIndex !== -1 &&
+          currentIndex < currentProjectTracks.length - 1
+        ) {
+          return currentProjectTracks[currentIndex + 1];
+        }
+      }
+    }
+
+    return null;
+  }, [
+    currentTrack,
+    queue,
+    currentProjectTracks,
+    shuffledProjectTracks,
+    isShuffled,
+  ]);
+
+  // Derived boolean, not raw progress: previewProgress updates every frame and
+  // depending on it directly would re-run this effect ~60x/second.
+  const inPreloadWindow = shouldStartPreload({
+    currentTime: previewProgress,
+    duration,
+  });
+
+  useEffect(() => {
+    if (!isPlaying || !currentTrack) return;
+    // Native looping means `ended` never fires, so there is nothing to preload.
+    if (loopMode === "track") return;
+    if (!inPreloadWindow) return;
+
+    const next = getNextTrack();
+    if (!next) {
+      setNextTrackPreload(null);
+      preloadKeyRef.current = null;
+      return;
+    }
+
+    const key = `${currentTrack.id}:${next.id}:${qualityPreference}`;
+    if (preloadKeyRef.current === key) return;
+    preloadKeyRef.current = key;
+
+    let cancelled = false;
+
+    void (async () => {
+      if (!shareTokenRef.current && !isAuthenticated) return;
+
+      try {
+        let url: string;
+
+        if (shareTokenRef.current) {
+          url = resolveApiUrl(
+            `/api/share/${shareTokenRef.current}/stream/${next.id}`,
+          );
+        } else {
+          const signed = await getStreamUrl(next.id, {
+            quality: qualityPreference,
+            versionId: next.versionId ?? undefined,
+          });
+          url = resolveApiUrl(signed.url);
+        }
+
+        if (cancelled) return;
+        setNextTrackPreload({ trackId: next.id, url, signedAt: Date.now() });
+      } catch (error) {
+        console.error("[AudioPlayer] Failed to preload next track:", error);
+        // Re-arm so a later frame can retry.
+        if (!cancelled) preloadKeyRef.current = null;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    isPlaying,
+    currentTrack,
+    loopMode,
+    inPreloadWindow,
+    qualityPreference,
+    isAuthenticated,
+    getNextTrack,
+  ]);
+
+  // The user can pause inside the preload window and come back after the
+  // signed URL has aged out. Drop it on resume so the trigger re-mints.
+  useEffect(() => {
+    if (!isPlaying || !nextTrackPreload) return;
+    if (
+      isPreloadStale({ signedAt: nextTrackPreload.signedAt, now: Date.now() })
+    ) {
+      preloadKeyRef.current = null;
+      setNextTrackPreload(null);
+    }
+  }, [isPlaying, nextTrackPreload]);
+
+  useEffect(() => {
+    setNextTrackPreload(null);
+    preloadKeyRef.current = null;
+  }, [currentTrack?.id]);
+
   useEffect(() => {
     if (!isAuthenticated) {
       setIsPlaying(false);
@@ -845,6 +989,8 @@ export function AudioPlayerProvider({
 
       setCurrentTrack(null);
       setAudioUrl(null);
+      setNextTrackPreload(null);
+      preloadKeyRef.current = null;
       setDuration(0);
       setPreviewProgress(0);
       setCurrentProjectTracks([]);
@@ -875,6 +1021,7 @@ export function AudioPlayerProvider({
         currentProjectTracks,
         shuffledProjectTracks,
         audioUrl,
+        nextTrackPreload,
         play,
         pause,
         resume,

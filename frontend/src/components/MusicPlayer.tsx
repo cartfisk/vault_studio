@@ -26,6 +26,7 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useWebHaptics } from "web-haptics/react";
 import WaveformComments from "./WaveformComments";
 import { usePreferences } from "../contexts/PreferencesContext";
+import { chooseTransition } from "../lib/gaplessPreload";
 
 interface MusicPlayerProps {
   hideControls?: boolean;
@@ -41,6 +42,7 @@ export default function MusicPlayer({
   const {
     currentTrack,
     audioUrl,
+    nextTrackPreload,
     isPlaying,
     pause,
     resume,
@@ -115,9 +117,6 @@ export default function MusicPlayer({
   const elARef = useRef<HTMLAudioElement | null>(null);
   const elBRef = useRef<HTMLAudioElement | null>(null);
   const [activeKey, setActiveKey] = useState<"a" | "b">("a");
-  // setActiveKey is unused until Task 4/5 wire up the swap; keep it declared
-  // now so its identity is stable, per the noUnusedLocals compiler check.
-  void setActiveKey;
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const getElement = useCallback(
@@ -129,6 +128,18 @@ export default function MusicPlayer({
   useEffect(() => {
     audioRef.current = getElement(activeKey);
   }, [activeKey, getElement]);
+
+  // Buffer the next track into whichever element is not currently playing.
+  useEffect(() => {
+    if (!nextTrackPreload) return;
+    const standby = getElement(activeKey === "a" ? "b" : "a");
+    if (!standby) return;
+    if (standby.src === nextTrackPreload.url) return;
+
+    standby.src = nextTrackPreload.url;
+    standby.volume = volumePercentage / 100;
+    standby.load();
+  }, [nextTrackPreload, activeKey, getElement, volumePercentage]);
 
   const rafIdRef = useRef<number | null>(null);
   const pendingSeekPositionRef = useRef<number | null>(null);
@@ -478,44 +489,68 @@ export default function MusicPlayer({
   }, [previewProgress]);
 
   useEffect(() => {
-    if (!audioUrl || !audioRef.current) return;
+    if (!audioUrl) return;
 
-    const audio = audioRef.current;
-    const currentSrc = audio.src;
-    const newSrc = audioUrl;
+    const active = getElement(activeKey);
+    const standby = getElement(activeKey === "a" ? "b" : "a");
+    if (!active) return;
+    if (active.src === audioUrl) return;
 
-    if (currentSrc !== newSrc) {
-      audio.src = audioUrl;
-      audio.volume = volumePercentage / 100;
-      audio.load();
+    const decision = chooseTransition({
+      standbySrc: standby?.src || null,
+      targetUrl: audioUrl,
+      readyState: standby?.readyState ?? 0,
+    });
+
+    if (decision === "swap" && standby) {
+      // Tear the outgoing element down BEFORE starting the incoming one.
+      // A half-finished swap plays two tracks at once, which is worse than a gap.
+      active.pause();
+      active.removeAttribute("src");
+      active.load();
+
+      standby.volume = volumePercentage / 100;
+      setActiveKey(activeKey === "a" ? "b" : "a");
 
       if (isPlaying) {
-        const handleLoadedData = () => {
-          audio.play().catch((error) => {
+        standby.play().catch((error) => {
+          console.error("Failed to play swapped element:", error);
+        });
+      }
+      return;
+    }
+
+    // Fallback: the existing load path, unchanged.
+    active.src = audioUrl;
+    active.volume = volumePercentage / 100;
+    active.load();
+
+    if (isPlaying) {
+      const handleLoadedData = () => {
+        active.play().catch((error) => {
+          console.error("Failed to play:", error);
+        });
+      };
+
+      active.addEventListener("loadeddata", handleLoadedData, { once: true });
+
+      const handleCanPlay = () => {
+        if (active.paused && active.readyState >= 2) {
+          active.play().catch((error) => {
             console.error("Failed to play:", error);
           });
-        };
+        }
+      };
 
-        audio.addEventListener("loadeddata", handleLoadedData, { once: true });
+      active.addEventListener("canplay", handleCanPlay, { once: true });
 
-        const handleCanPlay = () => {
-          if (audio.paused && audio.readyState >= 2) {
-            audio.play().catch((error) => {
-              console.error("Failed to play:", error);
-            });
-          }
-        };
-
-        audio.addEventListener("canplay", handleCanPlay, { once: true });
-
-        return () => {
-          audio.removeEventListener("loadeddata", handleLoadedData);
-          audio.removeEventListener("canplay", handleCanPlay);
-        };
-      }
+      return () => {
+        active.removeEventListener("loadeddata", handleLoadedData);
+        active.removeEventListener("canplay", handleCanPlay);
+      };
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioUrl]);
+  }, [audioUrl, activeKey, getElement, isPlaying, volumePercentage]);
 
   useEffect(() => {
     if (!audioRef.current) return;

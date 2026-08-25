@@ -9,6 +9,9 @@ it from the phone.
 ## Gate 1 — the standby actually buffers
 
 - [ ] Start a track longer than 40s from a queue of at least two tracks.
+      Start it **by tapping the track row, not the mini-player play
+      button** — that is the path that skips `handlePlayPause`, and it is
+      the one the gesture unlock has to cover.
 - [ ] With Safari Web Inspector attached, watch the Network tab at ~20s
       remaining. A request for the next track's stream URL must appear.
 - [ ] The request must transfer a meaningful number of bytes, not just
@@ -20,8 +23,11 @@ it from the phone.
 - [ ] Let the track run to its end without touching the device.
 - [ ] The next track must begin with no visible reload and no more than a
       brief seam. Anything approaching a second means the swap fell back to
-      the load path.
-- [ ] Repeat across at least three consecutive transitions.
+      the load path. "Visible reload" means the progress bar or the
+      duration readout resetting to 0:00 before the next track begins.
+- [ ] Repeat across at least three consecutive transitions, covering three
+      DISTINCT tracks — not one track played three times. Repeating a
+      single track can mask preload-key latching bugs.
 
 ## Gate 3 — no double audio
 

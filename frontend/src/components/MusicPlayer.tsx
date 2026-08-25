@@ -277,6 +277,49 @@ export default function MusicPlayer({
       });
   }, [activeKey, getElement]);
 
+  /**
+   * The unlock has to happen on the FIRST user gesture of the session, whatever
+   * it was. Tapping a track row goes straight to `play()` and never touches
+   * `handlePlayPause`, so hanging the unlock off that button alone leaves iOS
+   * users with a permanently empty standby element.
+   *
+   * `pointerdown` in the capture phase runs before any React handler, and
+   * `unlockStandbyElement` calls `play()` synchronously inside this stack —
+   * deferring it through a promise, a timeout, or a state update would put it
+   * outside the gesture and iOS would reject it.
+   */
+  useEffect(() => {
+    const handleFirstGesture = () => {
+      if (unlockedRef.current) {
+        document.removeEventListener("pointerdown", handleFirstGesture, true);
+        return;
+      }
+      // Idempotent via unlockedRef/unlockInFlightRef; a failed attempt leaves
+      // the listener in place so a later gesture retries.
+      unlockStandbyElement();
+    };
+
+    document.addEventListener("pointerdown", handleFirstGesture, true);
+    return () => {
+      document.removeEventListener("pointerdown", handleFirstGesture, true);
+    };
+  }, [unlockStandbyElement]);
+
+  /**
+   * Pause and detach BOTH elements. The standby can be holding a fully
+   * buffered signed stream for the account that just signed out, so logout has
+   * to reach it as well as the active one.
+   */
+  const teardownAudioElements = useCallback(() => {
+    for (const element of [elARef.current, elBRef.current]) {
+      if (!element) continue;
+      element.pause();
+      element.removeAttribute("src");
+      element.load();
+    }
+    unlockedRef.current = false;
+  }, []);
+
   const handlePlayPause = useCallback(() => {
     unlockStandbyElement();
 
@@ -663,8 +706,15 @@ export default function MusicPlayer({
         active.removeEventListener("canplay", handleCanPlay);
       };
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioUrl, activeKey, getElement, isPlaying, volumePercentage]);
+  }, [
+    audioUrl,
+    activeKey,
+    getElement,
+    isPlaying,
+    volumePercentage,
+    onPlayingChange,
+    onDurationChange,
+  ]);
 
   useEffect(() => {
     if (!audioRef.current) return;
@@ -685,7 +735,7 @@ export default function MusicPlayer({
   }, [isPlaying]);
 
   useEffect(() => {
-    audioPlayerRef.current = { audio: audioRef };
+    audioPlayerRef.current = { audio: audioRef, teardown: teardownAudioElements };
   });
 
   const formatTime = (seconds: number) => {

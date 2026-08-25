@@ -940,6 +940,12 @@ export function AudioPlayerProvider({
     if (preloadKeyRef.current === key) return;
     preloadKeyRef.current = key;
 
+    // Warm the waveform cache too. `play()` awaits `ensureTrackWaveform` before
+    // it can call `setAudioUrl`, so an unwarmed cache puts a full network round
+    // trip inside the `ended` -> swap path — exactly the dead air this feature
+    // exists to remove. Deliberately not awaited: it must not gate the URL mint.
+    void ensureTrackWaveform(next);
+
     let cancelled = false;
 
     void (async () => {
@@ -985,6 +991,7 @@ export function AudioPlayerProvider({
     qualityPreference,
     isAuthenticated,
     getNextTrack,
+    ensureTrackWaveform,
   ]);
 
   // The user can pause inside the preload window and come back after the
@@ -1007,7 +1014,12 @@ export function AudioPlayerProvider({
   useEffect(() => {
     if (!isAuthenticated) {
       setIsPlaying(false);
-      if (audioPlayerRef.current?.audio?.current) {
+      // Tear down BOTH elements. The standby can be holding a fully buffered
+      // signed stream belonging to the account that just signed out, and it
+      // would otherwise stay resident until some later preload overwrote it.
+      if (typeof audioPlayerRef.current?.teardown === "function") {
+        audioPlayerRef.current.teardown();
+      } else if (audioPlayerRef.current?.audio?.current) {
         audioPlayerRef.current.audio.current.pause();
         audioPlayerRef.current.audio.current.src = "";
       }

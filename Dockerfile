@@ -1,37 +1,43 @@
-FROM docker.io/oven/bun:latest AS frontend-builder
+# syntax=docker/dockerfile:1.7
 
-RUN apt-get update && apt-get install -y \
-    libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev libexpat1 \
-    && rm -rf /var/lib/apt/lists/*
+# ---------- frontend ----------
+FROM docker.io/oven/bun:1.3 AS frontend-builder
+
+# node-canvas is a build-time dep (frontend/vitePlugin.ts) and ships prebuilt
+# binaries, so it needs the runtime shared libs only -- not the -dev headers.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libjpeg62-turbo libgif7 librsvg2-2
 
 WORKDIR /app/frontend
 COPY frontend/bun.lock frontend/package.json ./
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --frozen-lockfile
 COPY frontend/ ./
-RUN bun run build
+RUN bunx vite build
 
+# ---------- backend ----------
 FROM docker.io/library/golang:1.25-alpine AS backend-builder
 
 ARG GIT_COMMIT=unknown
 ARG GIT_VERSION=dev
 
-RUN apk add --no-cache git sqlite gcc musl-dev
+RUN apk add --no-cache gcc musl-dev
 WORKDIR /app
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download && go mod verify
-COPY . .
-COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+RUN go mod download
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    cd cmd/server && \
     CGO_ENABLED=1 \
     go build -ldflags="-w -s -X main.CommitSHA=${GIT_COMMIT} -X main.Version=${GIT_VERSION}" \
-    -o ../../bin/vault-server
+    -o /out/vault-server ./cmd/server
 
-FROM docker.io/library/alpine:latest
+# ---------- runtime ----------
+FROM docker.io/library/alpine:3.22
 
 RUN apk add --no-cache ca-certificates ffmpeg sqlite wget && \
     addgroup -g 1000 vault && \
@@ -40,9 +46,9 @@ RUN apk add --no-cache ca-certificates ffmpeg sqlite wget && \
 USER 1000:1000
 WORKDIR /app
 
-COPY --from=backend-builder /app/bin/vault-server .
-COPY --from=backend-builder /app/frontend/dist ./frontend/dist
-COPY --from=backend-builder /app/migrations ./migrations
+COPY migrations ./migrations
+COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+COPY --from=backend-builder /out/vault-server .
 
 VOLUME /app/data
 EXPOSE 8080

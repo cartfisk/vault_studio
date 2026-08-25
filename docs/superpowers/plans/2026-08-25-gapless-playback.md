@@ -660,7 +660,7 @@ git commit -m "Render active/standby audio element pair"
 - Modify: `frontend/src/components/MusicPlayer.tsx`
 
 **Interfaces:**
-- Consumes: `shouldStartPreload`, `isPreloadStale`, `chooseTransition`, `SIGNED_URL_TTL_SECONDS` from Task 1; `elARef`, `elBRef`, `activeKey`, `setActiveKey`, `getElement` from Task 3.
+- Consumes: `shouldStartPreload`, `isPreloadStale`, `chooseTransition`, `SIGNED_URL_TTL_SECONDS` from Task 1; `elARef`, `elBRef`, `activeKey`, `setActiveKey`, `getElement` from Task 3. Restores `getNextTrack` (deleted in Task 2 as orphaned) in Step 2a.
 - Produces: `AudioPlayerContextType` gains `nextTrackPreload: NextTrackPreload | null` where `interface NextTrackPreload { trackId: string; url: string; signedAt: number }`.
 
 - [ ] **Step 1: Add the import and the published type**
@@ -705,6 +705,58 @@ Alongside the other `useState` calls in the provider, add:
    * latching it off.
    */
   const preloadKeyRef = useRef<string | null>(null);
+```
+
+- [ ] **Step 2a: Restore the `getNextTrack` selector**
+
+Task 2 deleted this selector because removing `preloadNextTrack` left it with no
+consumer and `tsconfig.json` sets `"noUnusedLocals": true`. Step 3 below is its
+new consumer, so restore it verbatim. Do **not** rewrite it from scratch — it
+mirrors the selection order in `nextTrack()` (queue first, then project tracks,
+honouring shuffle) and divergence here means preloading the wrong track.
+
+Place it immediately above the preload trigger effect:
+
+```ts
+  const getNextTrack = useCallback((): Track | null => {
+    if (!currentTrack) return null;
+
+    if (queue.length > 0) {
+      return queue[0];
+    }
+
+    if (currentProjectTracks.length > 0) {
+      if (isShuffled && shuffledProjectTracks.length > 0) {
+        const currentIndex = shuffledProjectTracks.findIndex(
+          (t) => t.id === currentTrack.id,
+        );
+        if (
+          currentIndex !== -1 &&
+          currentIndex < shuffledProjectTracks.length - 1
+        ) {
+          return shuffledProjectTracks[currentIndex + 1];
+        }
+      } else {
+        const currentIndex = currentProjectTracks.findIndex(
+          (t) => t.id === currentTrack.id,
+        );
+        if (
+          currentIndex !== -1 &&
+          currentIndex < currentProjectTracks.length - 1
+        ) {
+          return currentProjectTracks[currentIndex + 1];
+        }
+      }
+    }
+
+    return null;
+  }, [
+    currentTrack,
+    queue,
+    currentProjectTracks,
+    shuffledProjectTracks,
+    isShuffled,
+  ]);
 ```
 
 - [ ] **Step 3: Add the preload trigger effect**

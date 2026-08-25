@@ -977,13 +977,192 @@ Replace the body of the `audioUrl` effect (the one starting `if (!audioUrl || !a
   }, [audioUrl, activeKey, getElement, isPlaying, volumePercentage]);
 ```
 
+- [ ] **Step 9a: Add a URL normalizer and use it for every comparison**
+
+`resolveApiUrl` returns a **relative** path whenever `VITE_API_URL` is empty,
+which is the shipped default (`.env.example:6`). `element.src` is a getter that
+always returns an absolutely-resolved URL. Comparing them raw never matches,
+which both disables the swap and — because Step 9 widened the effect's dependency
+array — makes the effect fall through to `active.load()` on every pause and every
+volume-drag tick, restarting playback from 0:00.
+
+Add to `frontend/src/lib/gaplessPreload.ts`. It takes the base explicitly so the
+module stays DOM-free and testable in the node environment:
+
+```ts
+/**
+ * Resolves a possibly-relative media URL against a base so it can be compared
+ * with `HTMLMediaElement.src`, which always reports an absolute URL.
+ * Returns the input unchanged if it cannot be parsed.
+ */
+export function normalizeMediaUrl(url: string, base: string): string {
+  try {
+    return new URL(url, base).href;
+  } catch {
+    return url;
+  }
+}
+```
+
+Add to `frontend/src/lib/gaplessPreload.test.ts`:
+
+```ts
+describe("normalizeMediaUrl", () => {
+  const base = "https://vault.example.test/library";
+
+  it("resolves a relative api path against the page base", () => {
+    expect(normalizeMediaUrl("/api/media/stream/abc?expires=1", base)).toBe(
+      "https://vault.example.test/api/media/stream/abc?expires=1",
+    );
+  });
+
+  it("leaves an already-absolute url untouched", () => {
+    const absolute = "https://cdn.example.test/stream/abc";
+    expect(normalizeMediaUrl(absolute, base)).toBe(absolute);
+  });
+
+  it("makes a relative url and its resolved form compare equal", () => {
+    const relative = "/api/media/stream/abc";
+    const resolved = "https://vault.example.test/api/media/stream/abc";
+    expect(normalizeMediaUrl(relative, base)).toBe(
+      normalizeMediaUrl(resolved, base),
+    );
+  });
+
+  it("returns the input unchanged when it cannot be parsed", () => {
+    expect(normalizeMediaUrl("::not a url::", "::also bad::")).toBe(
+      "::not a url::",
+    );
+  });
+});
+```
+
+Then in `MusicPlayer.tsx`, normalize before every comparison in the `audioUrl`
+effect, replacing the raw guard and the `chooseTransition` call:
+
+```ts
+    const targetUrl = normalizeMediaUrl(audioUrl, window.location.href);
+    if (normalizeMediaUrl(active.src, window.location.href) === targetUrl) return;
+
+    const decision = chooseTransition({
+      standbySrc: standby?.src
+        ? normalizeMediaUrl(standby.src, window.location.href)
+        : null,
+      targetUrl,
+      readyState: standby?.readyState ?? 0,
+    });
+```
+
+Leave the assignments themselves using the original `audioUrl` — only the
+comparisons are normalized.
+
+- [ ] **Step 9b: Make `play()` consume the published preload**
+
+Without this the swap can never fire on the authenticated path.
+`internal/middleware/signed_url.go` folds a per-second `expires` timestamp into
+the HMAC, so the URL minted by the preload at ~20s remaining and the URL minted
+independently by `play()` at track start differ in both `expires` and
+`signature`. `chooseTransition` therefore always returns `"load"`. Task 2 deleted
+the old code that reused the preloaded URL; this restores that wiring against the
+new state.
+
+In `AudioPlayerContext.tsx`, add a ref mirror alongside the `nextTrackPreload`
+state so `play()` can read it without gaining a dependency:
+
+```ts
+  const nextTrackPreloadRef = useRef<NextTrackPreload | null>(null);
+```
+
+Keep it in sync — add this effect immediately after the state declaration:
+
+```ts
+  useEffect(() => {
+    nextTrackPreloadRef.current = nextTrackPreload;
+  }, [nextTrackPreload]);
+```
+
+Add `versionId` to the published type so a version switch cannot reuse the wrong
+audio:
+
+```ts
+export interface NextTrackPreload {
+  trackId: string;
+  versionId: number | null;
+  url: string;
+  /** Date.now() at signing time, used to detect expiry before swap. */
+  signedAt: number;
+}
+```
+
+Set it where the preload is published:
+
+```ts
+        setNextTrackPreload({
+          trackId: next.id,
+          versionId: next.versionId ?? null,
+          url,
+          signedAt: Date.now(),
+        });
+```
+
+In `play()`, reuse the preloaded URL when it matches, replacing the `else` branch
+that mints a signed URL:
+
+```ts
+      } else {
+        const preload = nextTrackPreloadRef.current;
+        const preloadMatches =
+          preload !== null &&
+          preload.trackId === trackToPlay.id &&
+          preload.versionId === (trackToPlay.versionId ?? null) &&
+          !isPreloadStale({ signedAt: preload.signedAt, now: Date.now() });
+
+        if (preloadMatches && preload) {
+          streamUrl = preload.url;
+        } else {
+          try {
+            const signed = await getStreamUrl(trackToPlay.id, {
+              quality,
+              versionId: trackToPlay.versionId ?? undefined,
+            });
+            streamUrl = resolveApiUrl(signed.url);
+          } catch (error) {
+            console.error("[AudioPlayer] Failed to get signed stream URL", error);
+            return;
+          }
+        }
+      }
+```
+
+Read through the ref, not the state value — `play()` runs before React commits
+the state change that clears the preload, and a ref has no such ordering hazard.
+
+- [ ] **Step 9c: Carry `duration` across the swap**
+
+`handleLoadedMetadata` is the only writer of `duration`, and
+`SWAP_MIN_READY_STATE = 3` guarantees `loadedmetadata` already fired on the
+standby ~20s earlier, while it had no listeners attached. It will never fire
+again for that resource, so after a swap `duration` keeps the previous track's
+value — which then feeds `shouldStartPreload` and mistimes the next preload.
+
+In the swap branch, after setting the standby's volume and before calling
+`play()`, add:
+
+```ts
+      if (Number.isFinite(standby.duration) && standby.duration > 0) {
+        setDuration(standby.duration);
+        onDurationChange(standby.duration);
+      }
+```
+
 - [ ] **Step 10: Verify**
 
 ```bash
 cd frontend && bunx tsc --noEmit && bun run test
 ```
 
-Expected: no TypeScript errors, all tests pass.
+Expected: no TypeScript errors, 47 tests passing (43 plus the 4 new
+`normalizeMediaUrl` cases).
 
 Then, in a desktop browser with devtools Network open:
 

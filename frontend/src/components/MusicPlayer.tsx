@@ -108,7 +108,28 @@ export default function MusicPlayer({
   const [duration, setDuration] = useState(0);
   const [previewProgress, setPreviewProgress] = useState(0);
   const waveformRef = useRef<HTMLDivElement | null>(null);
+  // Two elements ping-pong so the next track can buffer while the current one
+  // plays. `audioRef` keeps stable object identity and is repointed at
+  // whichever element is currently active, so every existing `audioRef.current`
+  // call site and `audioPlayerRef.current = { audio: audioRef }` keep working.
+  const elARef = useRef<HTMLAudioElement | null>(null);
+  const elBRef = useRef<HTMLAudioElement | null>(null);
+  const [activeKey, setActiveKey] = useState<"a" | "b">("a");
+  // setActiveKey is unused until Task 4/5 wire up the swap; keep it declared
+  // now so its identity is stable, per the noUnusedLocals compiler check.
+  void setActiveKey;
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const getElement = useCallback(
+    (key: "a" | "b") => (key === "a" ? elARef.current : elBRef.current),
+    [],
+  );
+
+  // Must run before any effect that reads audioRef.current.
+  useEffect(() => {
+    audioRef.current = getElement(activeKey);
+  }, [activeKey, getElement]);
+
   const rafIdRef = useRef<number | null>(null);
   const pendingSeekPositionRef = useRef<number | null>(null);
   const skipBackRef = useRef<AnimatedIconHandle>(null);
@@ -415,7 +436,7 @@ export default function MusicPlayer({
       audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
       audio.removeEventListener("timeupdate", handleTimeUpdate);
     };
-  }, [onPlayingChange, onEnded, onDurationChange, isDragging]);
+  }, [onPlayingChange, onEnded, onDurationChange, isDragging, activeKey]);
 
   useEffect(() => {
     const updateTime = () => {
@@ -829,11 +850,24 @@ export default function MusicPlayer({
 
   return (
     <>
+      {/*
+        Attributes must stay identical between the two elements — attribute
+        drift makes the standby's buffer unusable at swap time.
+        Only the active element loops; a looping standby would never fire
+        `ended` after a swap.
+      */}
       <audio
-        ref={audioRef}
+        ref={elARef}
         // Use the native loop behaviour; custom loop attempts caused stutter
         // and play() interruption errors on some platforms.
-        loop={loopMode === "track"}
+        loop={loopMode === "track" && activeKey === "a"}
+        preload="auto"
+        crossOrigin="anonymous"
+        playsInline
+      />
+      <audio
+        ref={elBRef}
+        loop={loopMode === "track" && activeKey === "b"}
         preload="auto"
         crossOrigin="anonymous"
         playsInline

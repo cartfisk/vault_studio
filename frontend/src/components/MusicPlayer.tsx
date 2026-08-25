@@ -220,51 +220,65 @@ export default function MusicPlayer({
   }, []);
 
   const unlockedRef = useRef(false);
+  const unlockInFlightRef = useRef(false);
 
   /**
    * iOS Safari will not buffer an <audio> element that has never played inside
-   * a user gesture, which would leave the standby empty at every swap. Play and
-   * immediately pause both elements, muted, during the first real gesture.
+   * a user gesture, which would leave the standby empty at every swap.
    *
-   * A srcless element rejects play(), so elements without a source get a 10ms
-   * silent data URI first.
+   * Only the STANDBY is unlocked here, never the active element. The active one
+   * is unlocked for free by the real playback this same gesture is about to
+   * start, and touching it would race that playback: the `audioUrl` effect
+   * assigns the real `src` and calls `load()`, which rejects this pending
+   * `play()` promise, and the rejection handler would then strip the real
+   * source out from under it.
+   *
+   * A srcless element rejects play(), so the standby gets a 10ms silent data
+   * URI first, removed again once the unlock settles.
    */
-  const unlockAudioElements = useCallback(() => {
-    if (unlockedRef.current) return;
-    unlockedRef.current = true;
+  const unlockStandbyElement = useCallback(() => {
+    if (unlockedRef.current || unlockInFlightRef.current) return;
 
-    for (const element of [elARef.current, elBRef.current]) {
-      if (!element) continue;
-      const wasMuted = element.muted;
-      const hadSource = !!element.getAttribute("src");
+    const standby = getElement(activeKey === "a" ? "b" : "a");
+    if (!standby) return;
 
-      if (!hadSource) {
-        element.src = SILENT_AUDIO_DATA_URI;
+    // Something is already loaded here — leave it alone rather than disturb a
+    // preload. A later gesture will retry.
+    if (standby.getAttribute("src")) return;
+
+    unlockInFlightRef.current = true;
+    const wasMuted = standby.muted;
+    standby.muted = true;
+    standby.src = SILENT_AUDIO_DATA_URI;
+
+    const restore = () => {
+      standby.muted = wasMuted;
+      // Only strip what this routine attached. By the time this runs the
+      // element may legitimately hold a real track.
+      if (standby.getAttribute("src") === SILENT_AUDIO_DATA_URI) {
+        standby.removeAttribute("src");
+        standby.load();
       }
+      unlockInFlightRef.current = false;
+    };
 
-      element.muted = true;
-      element
-        .play()
-        .then(() => {
-          element.pause();
-          element.muted = wasMuted;
-          if (!hadSource) {
-            element.removeAttribute("src");
-            element.load();
-          }
-        })
-        .catch(() => {
-          element.muted = wasMuted;
-          if (!hadSource) {
-            element.removeAttribute("src");
-            element.load();
-          }
-        });
-    }
-  }, []);
+    standby
+      .play()
+      .then(() => {
+        standby.pause();
+        unlockedRef.current = true;
+        restore();
+      })
+      .catch((error) => {
+        // Leave unlockedRef false so a later gesture retries rather than
+        // silently losing gapless for the rest of the session.
+        console.error("Failed to unlock standby audio element:", error);
+        restore();
+      });
+  }, [activeKey, getElement]);
 
   const handlePlayPause = useCallback(() => {
-    unlockAudioElements();
+    unlockStandbyElement();
 
     if (isPlaying) {
       pause();
@@ -280,7 +294,7 @@ export default function MusicPlayer({
     currentTrack,
     queue.length,
     playFromQueue,
-    unlockAudioElements,
+    unlockStandbyElement,
   ]);
 
   const handleTrackTitleClick = useCallback(() => {

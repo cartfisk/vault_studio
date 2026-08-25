@@ -4,12 +4,19 @@
 FROM docker.io/oven/bun:1.3 AS frontend-builder
 
 # node-canvas is a build-time dep (frontend/vitePlugin.ts) and ships prebuilt
-# binaries, so it needs the runtime shared libs only -- not the -dev headers.
+# binaries, so it needs runtime shared libs only -- not the -dev headers.
+#
+# Cairo alone is enough: the plugin only calls createCanvas, createImageData,
+# getContext("2d"), putImageData and toBuffer("image/png"). It renders no text
+# and loads no SVG/JPEG/GIF, so pango, librsvg, libjpeg and libgif are dead
+# weight -- and they drag in gdk-pixbuf, harfbuzz, fontconfig and
+# shared-mime-info, whose postinst scripts dominate this layer's build time.
+# 47 packages -> 19. If the plugin ever needs text or SVG, this must grow.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean && \
     apt-get update && apt-get install -y --no-install-recommends \
-    libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libjpeg62-turbo libgif7 librsvg2-2
+    libcairo2
 
 WORKDIR /app/frontend
 COPY frontend/bun.lock frontend/package.json ./

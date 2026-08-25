@@ -65,3 +65,12 @@ Makefile
 
 frontend/package-lock.json
 
+# capacitor native projects (not used by the web build)
+frontend/android/
+frontend/ios/
+
+# not part of any image build context
+.github/
+.claude/
+audio-analysis/
+data/

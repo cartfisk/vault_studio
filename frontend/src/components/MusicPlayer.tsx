@@ -408,8 +408,23 @@ export default function MusicPlayer({
     const audio = audioRef.current;
     if (!audio) return;
 
-    const handlePlay = () => onPlayingChange(true);
-    const handlePause = () => onPlayingChange(false);
+    // Ignore transport events from an element that is no longer the active one.
+    // The swap in the `audioUrl` effect pauses the outgoing element, and
+    // HTMLMediaElement queues `pause` as a task rather than firing it
+    // synchronously, so it can land after the swap has already handed over.
+    // Acting on it would flip `isPlaying` false and pause the track that just
+    // started. `audioRef.current` is repointed synchronously by the swap, so it
+    // is already the incoming element by the time the stale event arrives.
+    const isStale = () => audioRef.current !== audio;
+
+    const handlePlay = () => {
+      if (isStale()) return;
+      onPlayingChange(true);
+    };
+    const handlePause = () => {
+      if (isStale()) return;
+      onPlayingChange(false);
+    };
     const handleEnded = () => onEnded();
     const handleLoadedMetadata = () => {
       setDuration(audio.duration);
@@ -503,6 +518,12 @@ export default function MusicPlayer({
     });
 
     if (decision === "swap" && standby) {
+      // Hand over the active-element identity first. This only marks which
+      // element owns transport events; it starts no playback, so the teardown
+      // below still fully precedes `standby.play()`. It must happen before
+      // `active.pause()` so the queued `pause` event is recognised as stale.
+      audioRef.current = standby;
+
       // Tear the outgoing element down BEFORE starting the incoming one.
       // A half-finished swap plays two tracks at once, which is worse than a gap.
       active.pause();
@@ -515,6 +536,9 @@ export default function MusicPlayer({
       if (isPlaying) {
         standby.play().catch((error) => {
           console.error("Failed to play swapped element:", error);
+          // The outgoing element's `pause` was suppressed as stale, so nothing
+          // else will correct `isPlaying`. Report the real state.
+          onPlayingChange(false);
         });
       }
       return;

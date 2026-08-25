@@ -26,7 +26,7 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useWebHaptics } from "web-haptics/react";
 import WaveformComments from "./WaveformComments";
 import { usePreferences } from "../contexts/PreferencesContext";
-import { chooseTransition, normalizeMediaUrl } from "../lib/gaplessPreload";
+import { chooseTransition, normalizeMediaUrl, SILENT_AUDIO_DATA_URI } from "../lib/gaplessPreload";
 
 interface MusicPlayerProps {
   hideControls?: boolean;
@@ -219,7 +219,53 @@ export default function MusicPlayer({
     e.currentTarget.blur();
   }, []);
 
+  const unlockedRef = useRef(false);
+
+  /**
+   * iOS Safari will not buffer an <audio> element that has never played inside
+   * a user gesture, which would leave the standby empty at every swap. Play and
+   * immediately pause both elements, muted, during the first real gesture.
+   *
+   * A srcless element rejects play(), so elements without a source get a 10ms
+   * silent data URI first.
+   */
+  const unlockAudioElements = useCallback(() => {
+    if (unlockedRef.current) return;
+    unlockedRef.current = true;
+
+    for (const element of [elARef.current, elBRef.current]) {
+      if (!element) continue;
+      const wasMuted = element.muted;
+      const hadSource = !!element.getAttribute("src");
+
+      if (!hadSource) {
+        element.src = SILENT_AUDIO_DATA_URI;
+      }
+
+      element.muted = true;
+      element
+        .play()
+        .then(() => {
+          element.pause();
+          element.muted = wasMuted;
+          if (!hadSource) {
+            element.removeAttribute("src");
+            element.load();
+          }
+        })
+        .catch(() => {
+          element.muted = wasMuted;
+          if (!hadSource) {
+            element.removeAttribute("src");
+            element.load();
+          }
+        });
+    }
+  }, []);
+
   const handlePlayPause = useCallback(() => {
+    unlockAudioElements();
+
     if (isPlaying) {
       pause();
     } else if (currentTrack) {
@@ -227,7 +273,15 @@ export default function MusicPlayer({
     } else if (queue.length > 0) {
       playFromQueue();
     }
-  }, [isPlaying, pause, resume, currentTrack, queue.length, playFromQueue]);
+  }, [
+    isPlaying,
+    pause,
+    resume,
+    currentTrack,
+    queue.length,
+    playFromQueue,
+    unlockAudioElements,
+  ]);
 
   const handleTrackTitleClick = useCallback(() => {
     if (!currentTrack?.id) return;

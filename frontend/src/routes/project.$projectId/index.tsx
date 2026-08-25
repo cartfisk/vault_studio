@@ -189,7 +189,6 @@ function ProjectPageContent({ projectId }: { projectId: string }) {
         mapTrackToPlayerTrack(track, project, projectCoverImage),
         mapTracksToPlayerTracks(tracks, project, projectCoverImage),
         true,
-        false,
         mapTracksToPlayerTracks(tracksAfter, project, projectCoverImage),
       );
     },
@@ -462,7 +461,6 @@ function ProjectPageContent({ projectId }: { projectId: string }) {
         mapTrackToPlayerTrack(trackToPlay, project, projectCoverImage),
         mapTracksToPlayerTracks(tracks, project, projectCoverImage),
         true,
-        false,
         mapTracksToPlayerTracks(tracksAfter, project, projectCoverImage),
       );
     }

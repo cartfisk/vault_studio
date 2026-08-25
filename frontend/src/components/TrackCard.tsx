@@ -228,7 +228,7 @@ export function TrackCard({
       isSharedTrack: true,
     };
 
-    play(trackData, [trackData], true, false, []);
+    play(trackData, [trackData], true, []);
   };
 
   const incomingCoverSource = (() => {

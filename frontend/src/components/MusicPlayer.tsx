@@ -26,6 +26,7 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useWebHaptics } from "web-haptics/react";
 import WaveformComments from "./WaveformComments";
 import { usePreferences } from "../contexts/PreferencesContext";
+import { chooseTransition, normalizeMediaUrl, SILENT_AUDIO_DATA_URI } from "../lib/gaplessPreload";
 
 interface MusicPlayerProps {
   hideControls?: boolean;
@@ -41,6 +42,7 @@ export default function MusicPlayer({
   const {
     currentTrack,
     audioUrl,
+    nextTrackPreload,
     isPlaying,
     pause,
     resume,
@@ -57,8 +59,6 @@ export default function MusicPlayer({
     onProgressUpdate,
     onEnded,
     audioPlayerRef,
-    getPreloadedAudio,
-    clearPreloadedAudio,
     shareToken,
     sharePassword,
   } = useAudioPlayer();
@@ -110,7 +110,41 @@ export default function MusicPlayer({
   const [duration, setDuration] = useState(0);
   const [previewProgress, setPreviewProgress] = useState(0);
   const waveformRef = useRef<HTMLDivElement | null>(null);
+  // Two elements ping-pong so the next track can buffer while the current one
+  // plays. `audioRef` keeps stable object identity and is repointed at
+  // whichever element is currently active, so every existing `audioRef.current`
+  // call site and `audioPlayerRef.current = { audio: audioRef }` keep working.
+  const elARef = useRef<HTMLAudioElement | null>(null);
+  const elBRef = useRef<HTMLAudioElement | null>(null);
+  const [activeKey, setActiveKey] = useState<"a" | "b">("a");
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const getElement = useCallback(
+    (key: "a" | "b") => (key === "a" ? elARef.current : elBRef.current),
+    [],
+  );
+
+  // Must run before any effect that reads audioRef.current.
+  useEffect(() => {
+    audioRef.current = getElement(activeKey);
+  }, [activeKey, getElement]);
+
+  // Buffer the next track into whichever element is not currently playing.
+  useEffect(() => {
+    if (!nextTrackPreload) return;
+    const standby = getElement(activeKey === "a" ? "b" : "a");
+    if (!standby) return;
+    if (
+      normalizeMediaUrl(standby.src, window.location.href) ===
+      normalizeMediaUrl(nextTrackPreload.url, window.location.href)
+    )
+      return;
+
+    standby.src = nextTrackPreload.url;
+    standby.volume = volumePercentage / 100;
+    standby.load();
+  }, [nextTrackPreload, activeKey, getElement, volumePercentage]);
+
   const rafIdRef = useRef<number | null>(null);
   const pendingSeekPositionRef = useRef<number | null>(null);
   const skipBackRef = useRef<AnimatedIconHandle>(null);
@@ -185,7 +219,110 @@ export default function MusicPlayer({
     e.currentTarget.blur();
   }, []);
 
+  const unlockedRef = useRef(false);
+  const unlockInFlightRef = useRef(false);
+
+  /**
+   * iOS Safari will not buffer an <audio> element that has never played inside
+   * a user gesture, which would leave the standby empty at every swap.
+   *
+   * Only the STANDBY is unlocked here, never the active element. The active one
+   * is unlocked for free by the real playback this same gesture is about to
+   * start, and touching it would race that playback: the `audioUrl` effect
+   * assigns the real `src` and calls `load()`, which rejects this pending
+   * `play()` promise, and the rejection handler would then strip the real
+   * source out from under it.
+   *
+   * A srcless element rejects play(), so the standby gets a 10ms silent data
+   * URI first, removed again once the unlock settles.
+   */
+  const unlockStandbyElement = useCallback(() => {
+    if (unlockedRef.current || unlockInFlightRef.current) return;
+
+    const standby = getElement(activeKey === "a" ? "b" : "a");
+    if (!standby) return;
+
+    // Something is already loaded here — leave it alone rather than disturb a
+    // preload. A later gesture will retry.
+    if (standby.getAttribute("src")) return;
+
+    unlockInFlightRef.current = true;
+    const wasMuted = standby.muted;
+    standby.muted = true;
+    standby.src = SILENT_AUDIO_DATA_URI;
+
+    const restore = () => {
+      standby.muted = wasMuted;
+      // Only strip what this routine attached. By the time this runs the
+      // element may legitimately hold a real track.
+      if (standby.getAttribute("src") === SILENT_AUDIO_DATA_URI) {
+        standby.removeAttribute("src");
+        standby.load();
+      }
+      unlockInFlightRef.current = false;
+    };
+
+    standby
+      .play()
+      .then(() => {
+        standby.pause();
+        unlockedRef.current = true;
+        restore();
+      })
+      .catch((error) => {
+        // Leave unlockedRef false so a later gesture retries rather than
+        // silently losing gapless for the rest of the session.
+        console.error("Failed to unlock standby audio element:", error);
+        restore();
+      });
+  }, [activeKey, getElement]);
+
+  /**
+   * The unlock has to happen on the FIRST user gesture of the session, whatever
+   * it was. Tapping a track row goes straight to `play()` and never touches
+   * `handlePlayPause`, so hanging the unlock off that button alone leaves iOS
+   * users with a permanently empty standby element.
+   *
+   * `pointerdown` in the capture phase runs before any React handler, and
+   * `unlockStandbyElement` calls `play()` synchronously inside this stack —
+   * deferring it through a promise, a timeout, or a state update would put it
+   * outside the gesture and iOS would reject it.
+   */
+  useEffect(() => {
+    const handleFirstGesture = () => {
+      if (unlockedRef.current) {
+        document.removeEventListener("pointerdown", handleFirstGesture, true);
+        return;
+      }
+      // Idempotent via unlockedRef/unlockInFlightRef; a failed attempt leaves
+      // the listener in place so a later gesture retries.
+      unlockStandbyElement();
+    };
+
+    document.addEventListener("pointerdown", handleFirstGesture, true);
+    return () => {
+      document.removeEventListener("pointerdown", handleFirstGesture, true);
+    };
+  }, [unlockStandbyElement]);
+
+  /**
+   * Pause and detach BOTH elements. The standby can be holding a fully
+   * buffered signed stream for the account that just signed out, so logout has
+   * to reach it as well as the active one.
+   */
+  const teardownAudioElements = useCallback(() => {
+    for (const element of [elARef.current, elBRef.current]) {
+      if (!element) continue;
+      element.pause();
+      element.removeAttribute("src");
+      element.load();
+    }
+    unlockedRef.current = false;
+  }, []);
+
   const handlePlayPause = useCallback(() => {
+    unlockStandbyElement();
+
     if (isPlaying) {
       pause();
     } else if (currentTrack) {
@@ -193,7 +330,15 @@ export default function MusicPlayer({
     } else if (queue.length > 0) {
       playFromQueue();
     }
-  }, [isPlaying, pause, resume, currentTrack, queue.length, playFromQueue]);
+  }, [
+    isPlaying,
+    pause,
+    resume,
+    currentTrack,
+    queue.length,
+    playFromQueue,
+    unlockStandbyElement,
+  ]);
 
   const handleTrackTitleClick = useCallback(() => {
     if (!currentTrack?.id) return;
@@ -378,8 +523,23 @@ export default function MusicPlayer({
     const audio = audioRef.current;
     if (!audio) return;
 
-    const handlePlay = () => onPlayingChange(true);
-    const handlePause = () => onPlayingChange(false);
+    // Ignore transport events from an element that is no longer the active one.
+    // The swap in the `audioUrl` effect pauses the outgoing element, and
+    // HTMLMediaElement queues `pause` as a task rather than firing it
+    // synchronously, so it can land after the swap has already handed over.
+    // Acting on it would flip `isPlaying` false and pause the track that just
+    // started. `audioRef.current` is repointed synchronously by the swap, so it
+    // is already the incoming element by the time the stale event arrives.
+    const isStale = () => audioRef.current !== audio;
+
+    const handlePlay = () => {
+      if (isStale()) return;
+      onPlayingChange(true);
+    };
+    const handlePause = () => {
+      if (isStale()) return;
+      onPlayingChange(false);
+    };
     const handleEnded = () => onEnded();
     const handleLoadedMetadata = () => {
       setDuration(audio.duration);
@@ -417,7 +577,7 @@ export default function MusicPlayer({
       audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
       audio.removeEventListener("timeupdate", handleTimeUpdate);
     };
-  }, [onPlayingChange, onEnded, onDurationChange, isDragging]);
+  }, [onPlayingChange, onEnded, onDurationChange, isDragging, activeKey]);
 
   useEffect(() => {
     const updateTime = () => {
@@ -459,49 +619,102 @@ export default function MusicPlayer({
   }, [previewProgress]);
 
   useEffect(() => {
-    if (!audioUrl || !audioRef.current) return;
+    if (!audioUrl) return;
 
-    const audio = audioRef.current;
-    const currentSrc = audio.src;
-    const newSrc = audioUrl;
+    const active = getElement(activeKey);
+    const standby = getElement(activeKey === "a" ? "b" : "a");
+    if (!active) return;
 
-    if (currentSrc !== newSrc) {
-      const preloadedAudio = getPreloadedAudio();
-      if (preloadedAudio && preloadedAudio.src === audioUrl) {
-        clearPreloadedAudio();
+    // `element.src` always reports an absolute URL, while `resolveApiUrl`
+    // returns a relative path whenever VITE_API_URL is empty (the shipped
+    // default). Compare normalized forms or the guard never matches and the
+    // effect reloads the active element on every unrelated dependency change.
+    const targetUrl = normalizeMediaUrl(audioUrl, window.location.href);
+    if (normalizeMediaUrl(active.src, window.location.href) === targetUrl) return;
+
+    const decision = chooseTransition({
+      standbySrc: standby?.src
+        ? normalizeMediaUrl(standby.src, window.location.href)
+        : null,
+      targetUrl,
+      readyState: standby?.readyState ?? 0,
+    });
+
+    if (decision === "swap" && standby) {
+      // Hand over the active-element identity first. This only marks which
+      // element owns transport events; it starts no playback, so the teardown
+      // below still fully precedes `standby.play()`. It must happen before
+      // `active.pause()` so the queued `pause` event is recognised as stale.
+      audioRef.current = standby;
+
+      // Tear the outgoing element down BEFORE starting the incoming one.
+      // A half-finished swap plays two tracks at once, which is worse than a gap.
+      active.pause();
+      active.removeAttribute("src");
+      active.load();
+
+      standby.volume = volumePercentage / 100;
+
+      // `loadedmetadata` fired on the standby ~20s ago, while it had no
+      // listeners bound, and will not fire again for this resource. Without
+      // this, `duration` keeps the previous track's value and mistimes the
+      // next preload.
+      if (Number.isFinite(standby.duration) && standby.duration > 0) {
+        setDuration(standby.duration);
+        onDurationChange(standby.duration);
       }
 
-      audio.src = audioUrl;
-      audio.volume = volumePercentage / 100;
-      audio.load();
+      setActiveKey(activeKey === "a" ? "b" : "a");
 
       if (isPlaying) {
-        const handleLoadedData = () => {
-          audio.play().catch((error) => {
+        standby.play().catch((error) => {
+          console.error("Failed to play swapped element:", error);
+          // The outgoing element's `pause` was suppressed as stale, so nothing
+          // else will correct `isPlaying`. Report the real state.
+          onPlayingChange(false);
+        });
+      }
+      return;
+    }
+
+    // Fallback: the existing load path, unchanged.
+    active.src = audioUrl;
+    active.volume = volumePercentage / 100;
+    active.load();
+
+    if (isPlaying) {
+      const handleLoadedData = () => {
+        active.play().catch((error) => {
+          console.error("Failed to play:", error);
+        });
+      };
+
+      active.addEventListener("loadeddata", handleLoadedData, { once: true });
+
+      const handleCanPlay = () => {
+        if (active.paused && active.readyState >= 2) {
+          active.play().catch((error) => {
             console.error("Failed to play:", error);
           });
-        };
+        }
+      };
 
-        audio.addEventListener("loadeddata", handleLoadedData, { once: true });
+      active.addEventListener("canplay", handleCanPlay, { once: true });
 
-        const handleCanPlay = () => {
-          if (audio.paused && audio.readyState >= 2) {
-            audio.play().catch((error) => {
-              console.error("Failed to play:", error);
-            });
-          }
-        };
-
-        audio.addEventListener("canplay", handleCanPlay, { once: true });
-
-        return () => {
-          audio.removeEventListener("loadeddata", handleLoadedData);
-          audio.removeEventListener("canplay", handleCanPlay);
-        };
-      }
+      return () => {
+        active.removeEventListener("loadeddata", handleLoadedData);
+        active.removeEventListener("canplay", handleCanPlay);
+      };
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioUrl, getPreloadedAudio, clearPreloadedAudio]);
+  }, [
+    audioUrl,
+    activeKey,
+    getElement,
+    isPlaying,
+    volumePercentage,
+    onPlayingChange,
+    onDurationChange,
+  ]);
 
   useEffect(() => {
     if (!audioRef.current) return;
@@ -522,7 +735,7 @@ export default function MusicPlayer({
   }, [isPlaying]);
 
   useEffect(() => {
-    audioPlayerRef.current = { audio: audioRef };
+    audioPlayerRef.current = { audio: audioRef, teardown: teardownAudioElements };
   });
 
   const formatTime = (seconds: number) => {
@@ -836,11 +1049,24 @@ export default function MusicPlayer({
 
   return (
     <>
+      {/*
+        Attributes must stay identical between the two elements — attribute
+        drift makes the standby's buffer unusable at swap time.
+        Only the active element loops; a looping standby would never fire
+        `ended` after a swap.
+      */}
       <audio
-        ref={audioRef}
+        ref={elARef}
         // Use the native loop behaviour; custom loop attempts caused stutter
         // and play() interruption errors on some platforms.
-        loop={loopMode === "track"}
+        loop={loopMode === "track" && activeKey === "a"}
+        preload="auto"
+        crossOrigin="anonymous"
+        playsInline
+      />
+      <audio
+        ref={elBRef}
+        loop={loopMode === "track" && activeKey === "b"}
         preload="auto"
         crossOrigin="anonymous"
         playsInline

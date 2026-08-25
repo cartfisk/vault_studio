@@ -435,7 +435,6 @@ function SharedTrackPage() {
         },
       ],
       true,
-      false,
       [],
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -484,7 +483,6 @@ function SharedTrackPage() {
         },
       ],
       true,
-      false,
       [],
     );
   };

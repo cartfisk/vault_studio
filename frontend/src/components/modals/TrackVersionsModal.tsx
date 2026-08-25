@@ -81,8 +81,7 @@ export default function TrackVersionsModal({
   showBackdrop = false,
   canEdit = true,
 }: TrackVersionsModalProps) {
-  const { currentTrack, isPlaying, pause, play, clearPreloadedAudio } =
-    useAudioPlayer();
+  const { currentTrack, isPlaying, pause, play } = useAudioPlayer();
   const hapticFeedback = useWebHaptics();
   const [internalOpen, setInternalOpen] = useState(false);
   const [editedKey, setEditedKey] = useState<string | undefined>(
@@ -450,13 +449,11 @@ export default function TrackVersionsModal({
       });
 
       if (currentTrack?.id === trackId) {
-        clearPreloadedAudio();
-
         pause();
 
         setTimeout(() => {
           const updatedTrack = { ...currentTrack, versionId };
-          play(updatedTrack, undefined, false, true);
+          play(updatedTrack, undefined, false);
         }, 100);
       }
 

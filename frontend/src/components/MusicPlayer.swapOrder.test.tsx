@@ -189,4 +189,38 @@ describe("MusicPlayer swap ordering", () => {
 		// The incoming element must not have been told to play any earlier.
 		expect(calls.indexOf("b:play")).toBe(3);
 	});
+
+	/**
+	 * The component renders null until there is a track or a queue, so the
+	 * <audio> pair first attaches on a LATER render. Everything that drives
+	 * transport by hand - the play/pause button, `seekTo`, waveform clicks -
+	 * goes through `audioRef`, so it has to be repointed at that mount, not
+	 * only when the active element changes.
+	 */
+	it("points audioRef at the active element when it mounts later", async () => {
+		const audioPlayerRef: { current: any } = { current: null };
+		store.set({
+			currentTrack: null,
+			audioUrl: null,
+			isPlaying: false,
+			queue: [],
+			audioPlayerRef,
+		});
+
+		const { container } = render(<MusicPlayer hideControls />);
+		expect(container.querySelectorAll("audio")).toHaveLength(0);
+
+		await act(async () => {
+			store.set({
+				currentTrack: { id: "t1", title: "Track A", versionId: null },
+				audioUrl: TRACK_A_URL,
+			});
+		});
+
+		const [elA] = Array.from(
+			container.querySelectorAll("audio"),
+		) as HTMLAudioElement[];
+		expect(elA).toBeDefined();
+		expect(audioPlayerRef.current?.audio.current).toBe(elA);
+	});
 });

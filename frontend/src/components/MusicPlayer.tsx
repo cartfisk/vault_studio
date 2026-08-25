@@ -125,9 +125,13 @@ export default function MusicPlayer({
   );
 
   // Must run before any effect that reads audioRef.current.
+  // No dependency array: the <audio> pair is not mounted on the first render
+  // (the component returns null until there is a track or a queue), so an
+  // effect keyed on [activeKey] would latch audioRef.current to null and never
+  // re-run once the elements actually attach.
   useEffect(() => {
     audioRef.current = getElement(activeKey);
-  }, [activeKey, getElement]);
+  });
 
   // Buffer the next track into whichever element is not currently playing.
   useEffect(() => {

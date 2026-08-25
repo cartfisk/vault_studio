@@ -102,6 +102,9 @@ describe("shouldStartPreload", () => {
     expect(shouldStartPreload({ currentTime: 100, duration: 240, leadSeconds: 60 })).toBe(false);
   });
 
+  // Pins the tuning value the rest of this suite's expectations are computed
+  // from. If someone retunes the lead window, these expectations must be
+  // recomputed deliberately rather than silently drifting.
   it("defaults the lead window to 20 seconds", () => {
     expect(PRELOAD_LEAD_SECONDS).toBe(20);
   });
@@ -123,6 +126,9 @@ describe("isPreloadStale", () => {
     expect(isPreloadStale({ signedAt, now: signedAt + 265_000 })).toBe(false);
   });
 
+  // This constant duplicates the server's SIGNED_URL_TTL across the
+  // client/server boundary. Pinning it means a silent edit on either side
+  // breaks a test instead of producing 403s at swap time in production.
   it("mirrors the server ttl", () => {
     expect(SIGNED_URL_TTL_SECONDS).toBe(300);
   });
@@ -288,10 +294,13 @@ The existing preload buffers into a detached `new Audio()`. A detached element c
 **Files:**
 - Modify: `frontend/src/contexts/AudioPlayerContext.tsx`
 - Modify: `frontend/src/components/MusicPlayer.tsx`
+- Modify: `frontend/src/components/TrackCard.tsx:231`
+- Modify: `frontend/src/components/modals/TrackVersionsModal.tsx:459`
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `AudioPlayerContextType` no longer has `getPreloadedAudio` or `clearPreloadedAudio`.
+- Produces: `AudioPlayerContextType` no longer has `getPreloadedAudio` or `clearPreloadedAudio`, and `play()` loses its `forceReload` parameter. New signature:
+  `play(track: Track, projectTracks?: Track[], autoPlay?: boolean, queue?: Track[]) => void`
 
 - [ ] **Step 1: Remove the context interface members**
 
@@ -383,7 +392,48 @@ to:
     [isShuffled, ensureTrackWaveform, cacheWaveforms],
 ```
 
-`forceReload` is now unused inside `play()` but remains part of the public signature — leave the parameter in place, callers still pass it.
+- [ ] **Step 4a: Remove the now-dead `forceReload` parameter**
+
+`forceReload` existed only to bypass the preload cache deleted above. It now has
+no reader, and `tsconfig.json` sets `"noUnusedParameters": true`, so leaving it
+fails the `tsc` gate in Step 9 with `TS6133`.
+
+Remove it from the `AudioPlayerContextType` signature (around line 59):
+
+```ts
+    forceReload?: boolean,
+```
+
+Remove it from the `play` implementation signature (around line 440):
+
+```ts
+      forceReload: boolean = false,
+```
+
+Update all three call sites, dropping the fourth positional argument:
+
+`frontend/src/contexts/AudioPlayerContext.tsx:779`
+
+```ts
+        play(firstTrack, undefined, false, rest);
+```
+
+`frontend/src/components/TrackCard.tsx:231`
+
+```ts
+    play(trackData, [trackData], true, []);
+```
+
+`frontend/src/components/modals/TrackVersionsModal.tsx:459`
+
+```ts
+          play(updatedTrack, undefined, false);
+```
+
+The `TrackVersionsModal` caller passed `true` to force a reload when switching
+between versions of the same track. That still works: `play()` mints a fresh
+signed URL on every non-preload path, so the new version's URL differs from the
+currently loaded one and the audio element reloads on its own.
 
 - [ ] **Step 5: Delete the accessor callbacks**
 

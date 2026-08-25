@@ -49,6 +49,7 @@ export type LoopMode = "off" | "track" | "project";
 
 export interface NextTrackPreload {
   trackId: string;
+  versionId: number | null;
   url: string;
   /** Date.now() at signing time, used to detect expiry before swap. */
   signedAt: number;
@@ -117,6 +118,14 @@ export function AudioPlayerProvider({
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [nextTrackPreload, setNextTrackPreload] =
     useState<NextTrackPreload | null>(null);
+  /**
+   * Mirror of the state above. `play()` must read the preload synchronously,
+   * before React commits the state change that clears it, so it reads this.
+   */
+  const nextTrackPreloadRef = useRef<NextTrackPreload | null>(null);
+  useEffect(() => {
+    nextTrackPreloadRef.current = nextTrackPreload;
+  }, [nextTrackPreload]);
   /**
    * `${currentTrackId}:${nextTrackId}:${quality}` for the preload currently in
    * flight or published. Keyed on the tuple rather than a boolean so a queue
@@ -330,15 +339,26 @@ export function AudioPlayerProvider({
           `/api/share/${shareTokenRef.current}/stream/${trackToPlay.id}`,
         );
       } else {
-        try {
-          const signed = await getStreamUrl(trackToPlay.id, {
-            quality,
-            versionId: trackToPlay.versionId ?? undefined,
-          });
-          streamUrl = resolveApiUrl(signed.url);
-        } catch (error) {
-          console.error("[AudioPlayer] Failed to get signed stream URL", error);
-          return;
+        const preload = nextTrackPreloadRef.current;
+        const preloadMatches =
+          preload !== null &&
+          preload.trackId === trackToPlay.id &&
+          preload.versionId === (trackToPlay.versionId ?? null) &&
+          !isPreloadStale({ signedAt: preload.signedAt, now: Date.now() });
+
+        if (preloadMatches && preload) {
+          streamUrl = preload.url;
+        } else {
+          try {
+            const signed = await getStreamUrl(trackToPlay.id, {
+              quality,
+              versionId: trackToPlay.versionId ?? undefined,
+            });
+            streamUrl = resolveApiUrl(signed.url);
+          } catch (error) {
+            console.error("[AudioPlayer] Failed to get signed stream URL", error);
+            return;
+          }
         }
       }
 
@@ -941,7 +961,12 @@ export function AudioPlayerProvider({
         }
 
         if (cancelled) return;
-        setNextTrackPreload({ trackId: next.id, url, signedAt: Date.now() });
+        setNextTrackPreload({
+          trackId: next.id,
+          versionId: next.versionId ?? null,
+          url,
+          signedAt: Date.now(),
+        });
       } catch (error) {
         console.error("[AudioPlayer] Failed to preload next track:", error);
         // Re-arm so a later frame can retry.

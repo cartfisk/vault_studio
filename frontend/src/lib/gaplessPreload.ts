@@ -93,3 +93,16 @@ export function chooseTransition({
 	if (readyState < SWAP_MIN_READY_STATE) return "load";
 	return "swap";
 }
+
+/**
+ * Resolves a possibly-relative media URL against a base so it can be compared
+ * with `HTMLMediaElement.src`, which always reports an absolute URL.
+ * Returns the input unchanged if it cannot be parsed.
+ */
+export function normalizeMediaUrl(url: string, base: string): string {
+	try {
+		return new URL(url, base).href;
+	} catch {
+		return url;
+	}
+}

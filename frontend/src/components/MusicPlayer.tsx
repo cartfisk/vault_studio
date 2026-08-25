@@ -26,7 +26,7 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useWebHaptics } from "web-haptics/react";
 import WaveformComments from "./WaveformComments";
 import { usePreferences } from "../contexts/PreferencesContext";
-import { chooseTransition } from "../lib/gaplessPreload";
+import { chooseTransition, normalizeMediaUrl } from "../lib/gaplessPreload";
 
 interface MusicPlayerProps {
   hideControls?: boolean;
@@ -134,7 +134,11 @@ export default function MusicPlayer({
     if (!nextTrackPreload) return;
     const standby = getElement(activeKey === "a" ? "b" : "a");
     if (!standby) return;
-    if (standby.src === nextTrackPreload.url) return;
+    if (
+      normalizeMediaUrl(standby.src, window.location.href) ===
+      normalizeMediaUrl(nextTrackPreload.url, window.location.href)
+    )
+      return;
 
     standby.src = nextTrackPreload.url;
     standby.volume = volumePercentage / 100;
@@ -509,11 +513,19 @@ export default function MusicPlayer({
     const active = getElement(activeKey);
     const standby = getElement(activeKey === "a" ? "b" : "a");
     if (!active) return;
-    if (active.src === audioUrl) return;
+
+    // `element.src` always reports an absolute URL, while `resolveApiUrl`
+    // returns a relative path whenever VITE_API_URL is empty (the shipped
+    // default). Compare normalized forms or the guard never matches and the
+    // effect reloads the active element on every unrelated dependency change.
+    const targetUrl = normalizeMediaUrl(audioUrl, window.location.href);
+    if (normalizeMediaUrl(active.src, window.location.href) === targetUrl) return;
 
     const decision = chooseTransition({
-      standbySrc: standby?.src || null,
-      targetUrl: audioUrl,
+      standbySrc: standby?.src
+        ? normalizeMediaUrl(standby.src, window.location.href)
+        : null,
+      targetUrl,
       readyState: standby?.readyState ?? 0,
     });
 
@@ -531,6 +543,16 @@ export default function MusicPlayer({
       active.load();
 
       standby.volume = volumePercentage / 100;
+
+      // `loadedmetadata` fired on the standby ~20s ago, while it had no
+      // listeners bound, and will not fire again for this resource. Without
+      // this, `duration` keeps the previous track's value and mistimes the
+      // next preload.
+      if (Number.isFinite(standby.duration) && standby.duration > 0) {
+        setDuration(standby.duration);
+        onDurationChange(standby.duration);
+      }
+
       setActiveKey(activeKey === "a" ? "b" : "a");
 
       if (isPlaying) {

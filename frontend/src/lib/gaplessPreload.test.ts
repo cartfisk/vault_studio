@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
 	chooseTransition,
 	isPreloadStale,
+	normalizeMediaUrl,
 	PRELOAD_LEAD_SECONDS,
 	SIGNED_URL_TTL_SECONDS,
 	SWAP_MIN_READY_STATE,
@@ -129,5 +130,34 @@ describe("chooseTransition", () => {
 		expect(
 			chooseTransition({ standbySrc: targetUrl, targetUrl, readyState: 0 }),
 		).toBe("load");
+	});
+});
+
+describe("normalizeMediaUrl", () => {
+	const base = "https://vault.example.test/library";
+
+	it("resolves a relative api path against the page base", () => {
+		expect(normalizeMediaUrl("/api/media/stream/abc?expires=1", base)).toBe(
+			"https://vault.example.test/api/media/stream/abc?expires=1",
+		);
+	});
+
+	it("leaves an already-absolute url untouched", () => {
+		const absolute = "https://cdn.example.test/stream/abc";
+		expect(normalizeMediaUrl(absolute, base)).toBe(absolute);
+	});
+
+	it("makes a relative url and its resolved form compare equal", () => {
+		const relative = "/api/media/stream/abc";
+		const resolved = "https://vault.example.test/api/media/stream/abc";
+		expect(normalizeMediaUrl(relative, base)).toBe(
+			normalizeMediaUrl(resolved, base),
+		);
+	});
+
+	it("returns the input unchanged when it cannot be parsed", () => {
+		expect(normalizeMediaUrl("::not a url::", "::also bad::")).toBe(
+			"::not a url::",
+		);
 	});
 });

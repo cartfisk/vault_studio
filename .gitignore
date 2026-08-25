@@ -27,3 +27,6 @@ frontend/node_modules/
 Thumbs.db
 
 __pycache__/
+
+# superpowers SDD scratch workspace
+.superpowers/

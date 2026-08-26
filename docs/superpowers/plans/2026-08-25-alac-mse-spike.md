@@ -266,7 +266,7 @@ design, and everything after this task becomes moot for the ALAC tier.
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: a page at `/mse-spike/` that renders a support table, plus the
+- Produces: a page at `/mse-spike/index.html` that renders a support table, plus the
   module-scope bindings Task 5 extends in place — `log(line)`, `Impl` (the
   `ManagedMediaSource` or `MediaSource` constructor, or `undefined`), and the
   `AAC` / `ALAC` MIME strings. The matching `window.spike*` globals exist only
@@ -337,20 +337,24 @@ Create `frontend/public/mse-spike/index.html`:
 </html>
 ```
 
+> **Serve the page by its explicit filename.** `/mse-spike/` alone is
+> swallowed by the TanStack SPA fallback, which renders the application's
+> "Link not available" screen instead. Always use `/mse-spike/index.html`.
+
 - [ ] **Step 2: Serve it and check on desktop**
 
 ```bash
 cd frontend && npm run dev
 ```
 
-Open `http://localhost:3000/mse-spike/`. Expected on desktop Chrome:
+Open `http://localhost:3000/mse-spike/index.html`. Expected on desktop Chrome:
 `MediaSource present: true` and `AAC supported: true`. `ManagedMediaSource
 present` will be `false` — correct and expected off Safari.
 
 - [ ] **Step 3: Check on the phone**
 
 With the dev server still running, find the LAN address it prints and open
-`http://<lan-ip>:3000/mse-spike/` on the iPhone.
+`http://<lan-ip>:3000/mse-spike/index.html` on the iPhone.
 
 **This step answers question 1.** Record all four booleans verbatim; they go
 into the results document in Task 6. If `ALAC supported` is `false` on the
@@ -603,7 +607,7 @@ Append this to the end of the same `<script type="module">`, after the
 
 - [ ] **Step 4: Smoke test the trimmed join on desktop**
 
-Reload `http://localhost:3000/mse-spike/` and press **AAC, trimmed**.
+Reload `http://localhost:3000/mse-spike/index.html` and press **AAC, trimmed**.
 
 Expected: the log prints two appends, then `range count: 1`, and a continuous
 440Hz tone plays for 20 seconds. A `range count` of 2 means the appends did not
@@ -644,7 +648,7 @@ The spike's actual deliverable. Nothing here is code.
 cd frontend && npm run dev
 ```
 
-Open `http://<lan-ip>:3000/mse-spike/` on the iPhone (Safari 26+). If the page
+Open `http://<lan-ip>:3000/mse-spike/index.html` on the iPhone (Safari 26+). If the page
 fails to attach the MediaSource over plain HTTP, note it and retry over a
 tunnel — that is itself a finding worth recording.
 

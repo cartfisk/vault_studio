@@ -19,6 +19,9 @@ const fragMovFlags = "+frag_keyframe+empty_moov+default_base_moof"
 
 // SegmentCodecs are the lossless codecs served for gapless playback, one per
 // browser engine: ALAC for Safari, FLAC for Chrome and Firefox.
+//
+// internal/db/queries/segments.sql's ListLosslessVersionsMissingSegments
+// hardcodes len(SegmentCodecs) as 2 -- update that literal if this changes.
 var SegmentCodecs = []string{"alac", "flac"}
 
 // SegmentSet is one produced fragmented MP4 and its measured properties.
@@ -32,8 +35,18 @@ type SegmentSet struct {
 	Layout      FragmentLayout
 }
 
-// BuildSegmentSet encodes or remuxes sourcePath into a fragmented MP4 at
-// outputPath, then measures what it produced.
+// BuildSegmentSet encodes or remuxes sourcePath into a fragmented MP4,
+// measures what it produced, and only then places it at outputPath.
+//
+// ffmpeg writes and probes/scans happen against outputPath+".tmp", never
+// outputPath itself. Both the backfill command and the async transcoder can
+// target the same outputPath for an existing version -- ffmpeg's -y
+// truncates in place, and a reader (http.ServeContent serving a completed
+// set, or a concurrent backfill run measuring one) could observe a
+// half-written file if either wrote there directly. Writing to the tmp path
+// and renaming into place once the build is fully validated means any
+// concurrent reader sees either the old complete file or the new one, never
+// a partial one -- rename is atomic within a filesystem.
 //
 // When sourceCodec already matches targetCodec the audio is stream-copied.
 // That is a whole-file remux with no -ss/-t, so it keeps every frame; it is
@@ -47,6 +60,8 @@ func BuildSegmentSet(sourcePath, outputPath, targetCodec, sourceCodec string) (s
 		return nil, fmt.Errorf("create output directory: %w", err)
 	}
 
+	tmpPath := outputPath + ".tmp"
+
 	codecArg := targetCodec
 	if sourceCodec == targetCodec {
 		codecArg = "copy"
@@ -59,18 +74,19 @@ func BuildSegmentSet(sourcePath, outputPath, targetCodec, sourceCodec string) (s
 		"-frag_duration", strconv.Itoa(FragmentDurationMicros),
 		"-movflags", fragMovFlags,
 		"-f", "mp4",
-		"-y", outputPath,
+		"-y", tmpPath,
 	)
 	out, cmdErr := cmd.CombinedOutput()
 
-	// ffmpeg may have written outputPath (whole or partial) by this point.
+	// ffmpeg may have written tmpPath (whole or partial) by this point.
 	// If this function ends up returning an error for any reason below,
-	// remove it rather than leave a plausible-looking file on disk for a
-	// version that has no valid segment set. Ignore the removal's own
-	// error; it must never mask the real failure.
+	// remove it rather than leave it on disk. Ignore the removal's own
+	// error; it must never mask the real failure. outputPath is never
+	// touched until the rename at the very end, so there is nothing to
+	// clean up there.
 	defer func() {
 		if err != nil {
-			os.Remove(outputPath)
+			os.Remove(tmpPath)
 		}
 	}()
 
@@ -78,23 +94,24 @@ func BuildSegmentSet(sourcePath, outputPath, targetCodec, sourceCodec string) (s
 		return nil, fmt.Errorf("ffmpeg %s failed: %w: %s", targetCodec, cmdErr, out)
 	}
 
-	probe, err := probeSegmentFile(outputPath)
+	probe, err := probeSegmentFile(tmpPath)
 	if err != nil {
 		return nil, err
 	}
 
-	f, err := os.Open(outputPath)
+	f, err := os.Open(tmpPath)
 	if err != nil {
 		return nil, fmt.Errorf("open produced file: %w", err)
 	}
-	defer f.Close()
 
 	stat, err := f.Stat()
 	if err != nil {
+		f.Close()
 		return nil, fmt.Errorf("stat produced file: %w", err)
 	}
 
 	layout, err := ScanFragments(f, stat.Size())
+	f.Close()
 	if err != nil {
 		return nil, fmt.Errorf("scan %s fragments: %w", targetCodec, err)
 	}
@@ -110,6 +127,10 @@ func BuildSegmentSet(sourcePath, outputPath, targetCodec, sourceCodec string) (s
 			"%s output is %dus but produced 1 fragment; not fragmented",
 			targetCodec, contentMicros,
 		)
+	}
+
+	if err := os.Rename(tmpPath, outputPath); err != nil {
+		return nil, fmt.Errorf("rename %s into place: %w", targetCodec, err)
 	}
 
 	return &SegmentSet{

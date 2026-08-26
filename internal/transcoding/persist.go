@@ -54,5 +54,8 @@ func PersistSegmentSet(database *db.DB, setID int64, set *SegmentSet) error {
 		return fmt.Errorf("complete segment set: %w", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit segment set: %w", err)
+	}
+	return nil
 }

@@ -161,6 +161,10 @@ type Querier interface {
 	ListFederationTokensByUser(ctx context.Context, localUserID int64) ([]FederationToken, error)
 	ListFoldersByParent(ctx context.Context, arg ListFoldersByParentParams) ([]Folder, error)
 	ListFoldersByUser(ctx context.Context, userID int64) ([]Folder, error)
+	// The 2 below is len(transcoding.SegmentCodecs) (alac, flac). A version is
+	// only "done" once every codec has a completed set -- alac-completed with
+	// flac-failed must still be picked up, or a Safari-only fix ships silently.
+	// If SegmentCodecs ever gains or loses a codec, update this literal too.
 	ListLosslessVersionsMissingSegments(ctx context.Context) ([]ListLosslessVersionsMissingSegmentsRow, error)
 	ListPlainTracksByProject(ctx context.Context, arg ListPlainTracksByProjectParams) ([]Track, error)
 	ListProjectShareTokensByProject(ctx context.Context, projectID int64) ([]ProjectShareToken, error)

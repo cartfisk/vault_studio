@@ -78,6 +78,9 @@ func ScanFragments(r io.ReaderAt, size int64) (FragmentLayout, error) {
 	if len(moofStarts) == 0 {
 		return layout, fmt.Errorf("no moof box found; file is not fragmented")
 	}
+	if moofStarts[0] == 0 {
+		return layout, fmt.Errorf("moof at offset 0; file has no init segment")
+	}
 
 	layout.InitByteEnd = moofStarts[0] - 1
 	layout.Fragments = make([]Fragment, len(moofStarts))

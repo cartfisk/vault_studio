@@ -158,7 +158,7 @@ func (h *MediaHandler) gaplessManifest(r *http.Request, trackID, requestedQualit
 
 		return &gaplessManifest{
 			Codec:       codec,
-			URL:         "/api/stream/" + trackID + "/gapless/" + codec,
+			URL:         "/api/stream/" + trackID + "/gapless/" + codec + "?version_id=" + strconv.FormatInt(finalVersionID, 10),
 			SampleRate:  set.SampleRate,
 			SampleCount: set.SampleCount,
 			Channels:    set.Channels,

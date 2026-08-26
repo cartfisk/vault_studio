@@ -550,6 +550,7 @@ func (h *VersionsHandler) UploadVersion(w http.ResponseWriter, r *http.Request) 
 		err = h.transcoder.TranscodeVersion(ctx, transcoding.TranscodeVersionInput{
 			VersionID:      version.ID,
 			SourceFilePath: saveResult.Path,
+			SourceCodec:    metadata.Codec,
 			TrackPublicID:  track.PublicID,
 			UserID:         int64(userID),
 		})

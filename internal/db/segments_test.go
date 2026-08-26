@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"context"
 	"testing"
 
 	"bungleware/vault/internal/testutil"
@@ -68,6 +69,52 @@ func TestFragmentsCascadeOnSetDelete(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("fragments after cascade = %d, want 0", count)
+	}
+}
+
+// TestListLosslessVersionsMissingSegmentsCatchesFlacOnlyFailure proves that
+// backfill picks up a version whose ALAC set completed but whose FLAC set
+// failed. Before this query was made codec-agnostic, it keyed only on
+// codec = 'alac', so this shape -- reachable whenever one codec's ffmpeg
+// invocation fails and the other's succeeds -- was invisible to backfill
+// forever: Safari would play gapless, Chrome and Firefox never would.
+func TestListLosslessVersionsMissingSegmentsCatchesFlacOnlyFailure(t *testing.T) {
+	database := testutil.NewDB(t)
+	versionID := testutil.SeedVersion(t, database)
+
+	if _, err := database.Exec(
+		`INSERT INTO track_files (version_id, quality, file_path, file_size, format) VALUES (?, 'source', ?, 0, 'wav')`,
+		versionID, "/tmp/source.wav",
+	); err != nil {
+		t.Fatalf("insert source track file error = %v", err)
+	}
+
+	if _, err := database.Exec(
+		`INSERT INTO track_segment_sets (version_id, codec, file_path, status) VALUES (?, 'alac', '/tmp/gapless-alac.mp4', 'completed')`,
+		versionID,
+	); err != nil {
+		t.Fatalf("insert completed alac set error = %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO track_segment_sets (version_id, codec, file_path, status) VALUES (?, 'flac', '/tmp/gapless-flac.mp4', 'failed')`,
+		versionID,
+	); err != nil {
+		t.Fatalf("insert failed flac set error = %v", err)
+	}
+
+	rows, err := database.ListLosslessVersionsMissingSegments(context.Background())
+	if err != nil {
+		t.Fatalf("ListLosslessVersionsMissingSegments() error = %v", err)
+	}
+
+	var found bool
+	for _, row := range rows {
+		if row.VersionID == versionID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("version %d (alac completed, flac failed) not returned; backfill would never repair it", versionID)
 	}
 }
 

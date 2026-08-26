@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -229,5 +230,75 @@ func TestStreamURLOmitsGaplessForCrossUserTrack(t *testing.T) {
 
 	if len(keys) != 1 || keys[0] != "url" {
 		t.Fatalf("response keys = %v, want [url] (gapless metadata leaked to a user without access)", keys)
+	}
+}
+
+// TestStreamURLManifestURLNamesTheVersionItDescribes proves that the
+// manifest's "url" field carries the same version_id whose fragment layout
+// the manifest describes. gaplessManifest resolves the requested (possibly
+// non-active) version and returns THAT version's fragments, but the URL it
+// hands back must let StreamGapless serve bytes from the same version --
+// otherwise a client applies one version's byte offsets to a different
+// version's file.
+//
+// The two versions are seeded with segment sets of different sizes, so a
+// mismatch between the returned fragments and the requested version would
+// be visible even if the URL's version_id happened to be right, and vice
+// versa.
+func TestStreamURLManifestURLNamesTheVersionItDescribes(t *testing.T) {
+	database := testutil.NewDB(t)
+	owner := int64(1)
+	trackPublicID, activeVersionID := testutil.SeedTrackForUser(t, database, owner)
+	nonActiveVersionID := testutil.AddNonActiveVersion(t, database, trackPublicID)
+
+	activePath := filepath.Join(t.TempDir(), "active.mp4")
+	if err := os.WriteFile(activePath, make([]byte, 100), 0o644); err != nil {
+		t.Fatalf("write active fixture: %v", err)
+	}
+	testutil.SeedCompletedSegmentSet(t, database, activeVersionID, "alac", activePath)
+
+	nonActivePath := filepath.Join(t.TempDir(), "non-active.mp4")
+	if err := os.WriteFile(nonActivePath, make([]byte, 250), 0o644); err != nil {
+		t.Fatalf("write non-active fixture: %v", err)
+	}
+	testutil.SeedCompletedSegmentSet(t, database, nonActiveVersionID, "alac", nonActivePath)
+
+	testutil.SetUserQuality(t, database, owner, "lossless")
+
+	h := handlers.NewMediaHandler(testAuthConfig(), database)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/media/stream/"+trackPublicID+"?codecs=alac&version_id="+strconv.FormatInt(nonActiveVersionID, 10), nil)
+	req.SetPathValue("id", trackPublicID)
+	req = withUser(req, owner)
+
+	rec := httptest.NewRecorder()
+	if err := h.StreamURL(rec, req); err != nil {
+		t.Fatalf("StreamURL() error = %v", err)
+	}
+
+	payload := decodeResultObject(t, rec)
+	gapless, ok := payload["gapless"].(map[string]any)
+	if !ok {
+		t.Fatalf("gapless missing from response %v", payload)
+	}
+
+	// The fragments must be the non-active version's (byte_end 249, from
+	// its 250-byte file), not the active version's (byte_end 99).
+	fragments, ok := gapless["fragments"].([]any)
+	if !ok || len(fragments) != 1 {
+		t.Fatalf("fragments = %v, want a single fragment", gapless["fragments"])
+	}
+	frag, ok := fragments[0].(map[string]any)
+	if !ok {
+		t.Fatalf("fragment[0] = %v, want an object", fragments[0])
+	}
+	if end, _ := frag["end"].(float64); int64(end) != 249 {
+		t.Fatalf("fragment end = %v, want 249 (the non-active version's fragments)", frag["end"])
+	}
+
+	wantURL := "/api/stream/" + trackPublicID + "/gapless/alac?version_id=" + strconv.FormatInt(nonActiveVersionID, 10)
+	if gotURL, _ := gapless["url"].(string); gotURL != wantURL {
+		t.Fatalf("url = %q, want %q (must name the version the fragments describe)", gotURL, wantURL)
 	}
 }

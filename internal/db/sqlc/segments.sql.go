@@ -150,12 +150,10 @@ SELECT tv.id AS version_id, tf.file_path AS source_path
 FROM track_versions tv
 JOIN track_files tf
     ON tf.version_id = tv.id AND tf.quality = 'source'
-WHERE NOT EXISTS (
-    SELECT 1 FROM track_segment_sets s
-    WHERE s.version_id = tv.id
-      AND s.codec = 'alac'
-      AND s.status = 'completed'
-)
+WHERE (
+    SELECT COUNT(*) FROM track_segment_sets s
+    WHERE s.version_id = tv.id AND s.status = 'completed'
+) < 2
 ORDER BY tv.id
 `
 
@@ -164,6 +162,10 @@ type ListLosslessVersionsMissingSegmentsRow struct {
 	SourcePath string `json:"source_path"`
 }
 
+// The 2 below is len(transcoding.SegmentCodecs) (alac, flac). A version is
+// only "done" once every codec has a completed set -- alac-completed with
+// flac-failed must still be picked up, or a Safari-only fix ships silently.
+// If SegmentCodecs ever gains or loses a codec, update this literal too.
 func (q *Queries) ListLosslessVersionsMissingSegments(ctx context.Context) ([]ListLosslessVersionsMissingSegmentsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listLosslessVersionsMissingSegments)
 	if err != nil {

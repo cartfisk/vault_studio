@@ -119,6 +119,22 @@ func TestScanFragmentsNoFragments(t *testing.T) {
 	}
 }
 
+// TestScanFragmentsRejectsMoofAtOffsetZero covers a file whose first box
+// is a moof, with no init segment ahead of it. Without this guard,
+// InitByteEnd = moofStarts[0] - 1 computes -1, which would travel into the
+// database and out through the manifest as "initByteEnd": -1, from which a
+// client would issue a nonsensical "bytes=0--1" range request.
+func TestScanFragmentsRejectsMoofAtOffsetZero(t *testing.T) {
+	var buf bytes.Buffer
+	buf.Write(box("moof", 8))
+	buf.Write(box("mdat", 32))
+	data := buf.Bytes()
+
+	if _, err := ScanFragments(bytes.NewReader(data), int64(len(data))); err == nil {
+		t.Fatal("ScanFragments() error = nil, want error for moof at offset 0")
+	}
+}
+
 func TestScanFragmentsUndersizedBox(t *testing.T) {
 	b := make([]byte, 8)
 	binary.BigEndian.PutUint32(b[0:4], 4) // smaller than the 8-byte header

@@ -191,14 +191,46 @@ func SeedCompletedSegmentSet(t *testing.T, database *db.DB, versionID int64, cod
 		t.Fatalf("segment set LastInsertId error = %v", err)
 	}
 
+	// byte_end is inclusive, so the last byte of an N-byte file is N-1.
 	if _, err := database.Exec(
 		`INSERT INTO track_segment_fragments (set_id, idx, byte_start, byte_end) VALUES (?, 0, 0, ?)`,
-		setID, size,
+		setID, size-1,
 	); err != nil {
 		t.Fatalf("insert segment fragment error = %v", err)
 	}
 
 	return setID
+}
+
+// AddNonActiveVersion inserts a second track_versions row for the track
+// identified by trackPublicID, without changing the track's
+// active_version_id. Used to test behavior that must distinguish a
+// caller-requested version from the track's active one.
+func AddNonActiveVersion(t *testing.T, database *db.DB, trackPublicID string) (versionID int64) {
+	t.Helper()
+
+	var trackID int64
+	if err := database.QueryRow(
+		`SELECT id FROM tracks WHERE public_id = ?`, trackPublicID,
+	).Scan(&trackID); err != nil {
+		t.Fatalf("look up track by public_id error = %v", err)
+	}
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	versionRes, err := database.Exec(
+		`INSERT INTO track_versions (track_id, version_name) VALUES (?, ?)`,
+		trackID, "v2-"+suffix,
+	)
+	if err != nil {
+		t.Fatalf("insert non-active version error = %v", err)
+	}
+	newVersionID, err := versionRes.LastInsertId()
+	if err != nil {
+		t.Fatalf("non-active version LastInsertId error = %v", err)
+	}
+
+	return newVersionID
 }
 
 // SetUserQuality upserts userID's default_quality preference, so

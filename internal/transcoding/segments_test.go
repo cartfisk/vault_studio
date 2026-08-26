@@ -1,7 +1,9 @@
 package transcoding
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -151,6 +153,63 @@ func TestBuildSegmentSetLeavesNoFileOnFFmpegFailure(t *testing.T) {
 
 	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
 		t.Errorf("output file left behind at %s after ffmpeg failure: stat err = %v", out, statErr)
+	}
+}
+
+// TestBuildSegmentSetIsAtomicToConcurrentReaders proves BuildSegmentSet
+// never truncates outputPath in place while a reader (e.g.
+// http.ServeContent serving a previously completed set, or a concurrent
+// backfill run) has it open. It pre-creates outputPath with known content
+// and opens a descriptor on it before calling BuildSegmentSet -- if the
+// implementation writes straight to outputPath (ffmpeg -y opens with
+// O_TRUNC), that truncates the file underneath the already-open
+// descriptor, corrupting whatever the fictitious reader is mid-serving.
+// An atomic write-to-tmp-then-rename instead leaves the pre-opened
+// descriptor pointing at the old, now-unlinked inode: a read through it
+// after the call returns must still see the exact original bytes.
+func TestBuildSegmentSetIsAtomicToConcurrentReaders(t *testing.T) {
+	dir := t.TempDir()
+	src := makeSourceWAV(t, dir, 12)
+	out := filepath.Join(dir, "gapless-alac.mp4")
+
+	oldContent := []byte("old-completed-segment-set-bytes-a-reader-is-mid-serving")
+	if err := os.WriteFile(out, oldContent, 0o644); err != nil {
+		t.Fatalf("write pre-existing output: %v", err)
+	}
+
+	reader, err := os.Open(out)
+	if err != nil {
+		t.Fatalf("open pre-existing output: %v", err)
+	}
+	defer reader.Close()
+
+	set, err := BuildSegmentSet(src, out, "alac", "pcm_s16le")
+	if err != nil {
+		t.Fatalf("BuildSegmentSet() error = %v", err)
+	}
+
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read from pre-opened descriptor: %v", err)
+	}
+	if !bytes.Equal(got, oldContent) {
+		t.Fatalf("bytes changed underneath a pre-opened reader: want %q, got %q (%d bytes)", oldContent, got, len(got))
+	}
+
+	if set.FilePath != out {
+		t.Errorf("SegmentSet.FilePath = %q, want final path %q, not a tmp path", set.FilePath, out)
+	}
+
+	info, err := os.Stat(out)
+	if err != nil {
+		t.Fatalf("stat final output: %v", err)
+	}
+	if info.Size() == int64(len(oldContent)) {
+		t.Fatalf("output at %s was not replaced by the new build", out)
+	}
+
+	if _, err := os.Stat(out + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf(".tmp file left behind at %s: stat err = %v", out+".tmp", err)
 	}
 }
 

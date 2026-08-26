@@ -30,3 +30,6 @@ __pycache__/
 
 # superpowers SDD scratch workspace
 .superpowers/
+
+# Throwaway MSE spike fixtures (regenerate with make-fixtures.sh)
+frontend/public/mse-spike/fixtures/

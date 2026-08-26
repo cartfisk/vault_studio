@@ -37,6 +37,12 @@ for half in h1 h2; do
     -movflags "$frag_elst" -f mp4 "$out/$half-aac-elst.mp4"
   ffmpeg -v error -i "$out/$half.wav" -c:a alac \
     -movflags "$frag_elst" -f mp4 "$out/$half-alac-elst.mp4"
+  # FLAC in MP4. Chrome supports this in MSE and does not support ALAC; both
+  # are lossless and neither carries encoder priming, so the same
+  # placement-only join should apply. If Safari supports it too, one lossless
+  # codec covers every browser instead of one per engine.
+  ffmpeg -v error -i "$out/$half.wav" -c:a flac \
+    -movflags "$frag" -f mp4 "$out/$half-flac.mp4"
 done
 
 # CMAF segments via the dash muxer. Unlike the +empty_moov files, the init
@@ -67,7 +73,8 @@ ffmpeg -v error -f lavfi -i "anoisesrc=r=44100:d=240:c=pink" -ac 2 \
   echo '  "encoded": {'
   first=1
   for f in h1-aac h2-aac h1-alac h2-alac \
-           h1-aac-elst h2-aac-elst h1-alac-elst h2-alac-elst; do
+           h1-aac-elst h2-aac-elst h1-alac-elst h2-alac-elst \
+           h1-flac h2-flac; do
     dur=$(ffprobe -v error -show_entries stream=duration \
       -of default=nw=1:nk=1 "$out/$f.mp4")
     # Overshoot beyond the true 44100 samples. For the -elst variants this is

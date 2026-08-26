@@ -29,6 +29,7 @@
     <button data-mode="aac-headtrim">AAC, head trim</button>
     <button data-mode="aac-elst">AAC, overlap + edit list</button>
     <button data-mode="alac-exact">ALAC, exact (no trim)</button>
+    <button data-mode="flac-exact">FLAC, exact (no trim)</button>
     <button data-mode="aac-exact">AAC, exact (no trim)</button>
     <button data-mode="aac-cmaf">AAC, CMAF + edit list</button>
   </p>
@@ -39,6 +40,7 @@
     import { computeAppendPlan } from './trim.js';
     const AAC = 'audio/mp4; codecs="mp4a.40.2"';
     const ALAC = 'audio/mp4; codecs="alac"';
+    const FLAC = 'audio/mp4; codecs="flac"';
 
     const logEl = document.getElementById('log');
     function log(line) {
@@ -56,6 +58,7 @@
       ['MediaSource present', hasPlain],
       ['AAC supported', Impl ? Impl.isTypeSupported(AAC) : false],
       ['ALAC supported', Impl ? Impl.isTypeSupported(ALAC) : false],
+      ['FLAC supported', Impl ? Impl.isTypeSupported(FLAC) : false],
     ];
 
     document.getElementById('support').innerHTML =
@@ -95,6 +98,7 @@
       'aac-headtrim':  { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], strategy: 'headtrim' },
       'aac-elst':      { type: AAC, files: ['h1-aac-elst.mp4', 'h2-aac-elst.mp4'], strategy: 'overlap' },
       'alac-exact':    { type: ALAC, files: ['h1-alac.mp4', 'h2-alac.mp4'], strategy: 'exact' },
+      'flac-exact':    { type: FLAC, files: ['h1-flac.mp4', 'h2-flac.mp4'], strategy: 'exact' },
       'aac-exact':     { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], strategy: 'exact' },
 
       // CMAF: each segment is an init (carrying the elst edit list) plus a

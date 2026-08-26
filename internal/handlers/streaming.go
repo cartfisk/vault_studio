@@ -23,6 +23,41 @@ func NewStreamingHandler(database *db.DB) *StreamingHandler {
 	return &StreamingHandler{db: database}
 }
 
+// resolveVersionForTrack resolves which track_versions row a streaming
+// request should read from, and verifies it actually belongs to track.
+//
+// CheckTrackAccess is run against the track named in the URL path, but an
+// optional version_id can be supplied via the query string to pick a
+// specific version's audio. Without this check, access would be granted
+// based on one track while the bytes served are selected by a version_id
+// for a *different* track — letting a user with legitimate access to any
+// track read another user's track file or segment set just by guessing or
+// enumerating version ids. Both StreamTrack and StreamGapless call this so
+// the check can't drift between them.
+//
+// When requestedVersionID is nil, the caller didn't ask for a specific
+// version, so the track's own active_version_id is used. That's safe by
+// construction: it was never taken from request input, so there's nothing
+// to cross-check.
+func (h *StreamingHandler) resolveVersionForTrack(ctx context.Context, track sqlc.Track, requestedVersionID *int64) (int64, error) {
+	if requestedVersionID == nil {
+		if !track.ActiveVersionID.Valid {
+			return 0, apperr.NewBadRequest("track has no active version")
+		}
+		return track.ActiveVersionID.Int64, nil
+	}
+
+	version, err := h.db.Queries.GetTrackVersion(ctx, *requestedVersionID)
+	if err := httputil.HandleDBError(err, "version not found", "failed to query version"); err != nil {
+		return 0, err
+	}
+	if version.TrackID != track.ID {
+		return 0, apperr.NewForbidden("version does not belong to track")
+	}
+
+	return version.ID, nil
+}
+
 func (h *StreamingHandler) StreamTrack(w http.ResponseWriter, r *http.Request) error {
 	userID, ok := middleware.GetUserID(r.Context())
 	if !ok {
@@ -69,14 +104,9 @@ func (h *StreamingHandler) StreamTrack(w http.ResponseWriter, r *http.Request) e
 		return apperr.NewForbidden("access revoked")
 	}
 
-	var finalVersionID int64
-	if versionID != nil {
-		finalVersionID = *versionID
-	} else {
-		if !track.ActiveVersionID.Valid {
-			return apperr.NewBadRequest("track has no active version")
-		}
-		finalVersionID = track.ActiveVersionID.Int64
+	finalVersionID, err := h.resolveVersionForTrack(ctx, track, versionID)
+	if err != nil {
+		return err
 	}
 
 	quality := h.resolveQuality(ctx, int64(userID), track.ID, requestedQuality)

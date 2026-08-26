@@ -46,16 +46,18 @@ func (h *StreamingHandler) StreamGapless(w http.ResponseWriter, r *http.Request)
 		return apperr.NewForbidden("access revoked")
 	}
 
-	versionID := track.ActiveVersionID.Int64
+	var requestedVersionID *int64
 	if raw := r.URL.Query().Get("version_id"); raw != "" {
 		parsed, perr := strconv.ParseInt(raw, 10, 64)
 		if perr != nil {
 			return apperr.NewBadRequest("invalid version_id")
 		}
-		versionID = parsed
+		requestedVersionID = &parsed
 	}
-	if versionID == 0 {
-		return apperr.NewBadRequest("track has no active version")
+
+	versionID, err := h.resolveVersionForTrack(ctx, track, requestedVersionID)
+	if err != nil {
+		return err
 	}
 
 	set, err := h.db.GetCompletedSegmentSet(ctx, sqlc.GetCompletedSegmentSetParams{

@@ -38,7 +38,7 @@ type SegmentSet struct {
 // When sourceCodec already matches targetCodec the audio is stream-copied.
 // That is a whole-file remux with no -ss/-t, so it keeps every frame; it is
 // not the packet-boundary cutting that corrupts sample-exact work.
-func BuildSegmentSet(sourcePath, outputPath, targetCodec, sourceCodec string) (*SegmentSet, error) {
+func BuildSegmentSet(sourcePath, outputPath, targetCodec, sourceCodec string) (set *SegmentSet, err error) {
 	if targetCodec != "alac" && targetCodec != "flac" {
 		return nil, fmt.Errorf("unsupported segment codec %q", targetCodec)
 	}
@@ -61,8 +61,21 @@ func BuildSegmentSet(sourcePath, outputPath, targetCodec, sourceCodec string) (*
 		"-f", "mp4",
 		"-y", outputPath,
 	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("ffmpeg %s failed: %w: %s", targetCodec, err, out)
+	out, cmdErr := cmd.CombinedOutput()
+
+	// ffmpeg may have written outputPath (whole or partial) by this point.
+	// If this function ends up returning an error for any reason below,
+	// remove it rather than leave a plausible-looking file on disk for a
+	// version that has no valid segment set. Ignore the removal's own
+	// error; it must never mask the real failure.
+	defer func() {
+		if err != nil {
+			os.Remove(outputPath)
+		}
+	}()
+
+	if cmdErr != nil {
+		return nil, fmt.Errorf("ffmpeg %s failed: %w: %s", targetCodec, cmdErr, out)
 	}
 
 	probe, err := probeSegmentFile(outputPath)
@@ -116,28 +129,39 @@ func BuildSegmentSet(sourcePath, outputPath, targetCodec, sourceCodec string) (*
 // The cross-check is why both codecs are built together. A disagreement means
 // one encode dropped or padded audio, and placing tracks at running offsets of
 // a wrong length is exactly the failure this feature exists to avoid.
-func BuildAllSegmentSets(sourcePath, versionDir, sourceCodec string) ([]*SegmentSet, error) {
-	sets := make([]*SegmentSet, 0, len(SegmentCodecs))
+func BuildAllSegmentSets(sourcePath, versionDir, sourceCodec string) (sets []*SegmentSet, err error) {
+	built := make([]*SegmentSet, 0, len(SegmentCodecs))
+
+	// If any codec fails, or the cross-check below disagrees, remove every
+	// file successfully built so far rather than leave a partial set (e.g.
+	// a valid gapless-alac.mp4 with no matching FLAC) on disk.
+	defer func() {
+		if err != nil {
+			for _, s := range built {
+				os.Remove(s.FilePath)
+			}
+		}
+	}()
 
 	for _, codec := range SegmentCodecs {
 		out := filepath.Join(versionDir, "gapless-"+codec+".mp4")
-		set, err := BuildSegmentSet(sourcePath, out, codec, sourceCodec)
-		if err != nil {
-			return nil, err
+		set, buildErr := BuildSegmentSet(sourcePath, out, codec, sourceCodec)
+		if buildErr != nil {
+			return nil, buildErr
 		}
-		sets = append(sets, set)
+		built = append(built, set)
 	}
 
-	for _, set := range sets[1:] {
-		if set.SampleCount != sets[0].SampleCount {
+	for _, set := range built[1:] {
+		if set.SampleCount != built[0].SampleCount {
 			return nil, fmt.Errorf(
 				"sample count disagreement: %s=%d, %s=%d",
-				sets[0].Codec, sets[0].SampleCount, set.Codec, set.SampleCount,
+				built[0].Codec, built[0].SampleCount, set.Codec, set.SampleCount,
 			)
 		}
 	}
 
-	return sets, nil
+	return built, nil
 }
 
 type segmentProbe struct {
@@ -148,10 +172,11 @@ type segmentProbe struct {
 
 // probeSegmentFile reads the true sample count from a produced file.
 //
-// duration_ts is in time_base units, so the count is scaled rather than read
-// directly: sampleCount = durationTS * tbNum * sampleRate / tbDen. For these
-// files the time base is normally 1/sampleRate and the scaling is a no-op, but
-// relying on that would be an assumption about the muxer.
+// duration_ts is in time_base units, so the count is scaled by sampleCountFor
+// rather than read directly. For these files the time base is normally
+// 1/sampleRate and the scaling is a no-op, but relying on that would be an
+// assumption about the muxer — sampleCountFor verifies it instead of
+// assuming it.
 func probeSegmentFile(path string) (segmentProbe, error) {
 	var p segmentProbe
 
@@ -191,15 +216,42 @@ func probeSegmentFile(path string) (segmentProbe, error) {
 		return p, fmt.Errorf("%s: %w", path, err)
 	}
 
-	p.SampleRate = rate
-	p.Channels = s.Channels
-	p.SampleCount = s.DurationTS * num * int64(rate) / den
-
-	if p.SampleCount <= 0 {
-		return p, fmt.Errorf("computed sample count %d for %s", p.SampleCount, path)
+	count, err := sampleCountFor(s.DurationTS, num, den, int64(rate))
+	if err != nil {
+		return p, fmt.Errorf("%s: %w", path, err)
 	}
 
+	p.SampleRate = rate
+	p.Channels = s.Channels
+	p.SampleCount = count
+
 	return p, nil
+}
+
+// sampleCountFor scales a stream's duration_ts (in time_base units) to a
+// sample count: durationTS * num / den is the duration in seconds, times
+// rate samples per second. It is exact only when den evenly divides
+// durationTS*num*rate; rather than silently truncate a wrong-but-plausible
+// count, it errors loudly, because a wrong sample count here would place
+// every later track in the play queue at a wrong offset.
+func sampleCountFor(durationTS, num, den, rate int64) (int64, error) {
+	total := durationTS * num * rate
+	if total%den != 0 {
+		return 0, fmt.Errorf(
+			"sample count not exact: duration_ts=%d * num=%d * rate=%d = %d, not divisible by den=%d",
+			durationTS, num, rate, total, den,
+		)
+	}
+
+	count := total / den
+	if count <= 0 {
+		return 0, fmt.Errorf(
+			"computed non-positive sample count %d (duration_ts=%d, num=%d, den=%d, rate=%d)",
+			count, durationTS, num, den, rate,
+		)
+	}
+
+	return count, nil
 }
 
 func parseTimeBase(tb string) (num, den int64, err error) {

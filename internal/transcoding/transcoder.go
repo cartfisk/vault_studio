@@ -233,12 +233,20 @@ func (t *Transcoder) processSegmentsJob(job Job) {
 }
 
 func (t *Transcoder) persistSegmentSet(ctx context.Context, setID int64, set *SegmentSet) error {
-	if err := t.db.DeleteSegmentFragments(ctx, setID); err != nil {
+	tx, err := t.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	qtx := t.db.Queries.WithTx(tx)
+
+	if err := qtx.DeleteSegmentFragments(ctx, setID); err != nil {
 		return fmt.Errorf("clear fragments: %w", err)
 	}
 
 	for i, frag := range set.Layout.Fragments {
-		err := t.db.CreateSegmentFragment(ctx, sqlc.CreateSegmentFragmentParams{
+		err := qtx.CreateSegmentFragment(ctx, sqlc.CreateSegmentFragmentParams{
 			SetID:     setID,
 			Idx:       int64(i),
 			ByteStart: frag.Start,
@@ -249,14 +257,18 @@ func (t *Transcoder) persistSegmentSet(ctx context.Context, setID int64, set *Se
 		}
 	}
 
-	return t.db.CompleteSegmentSet(ctx, sqlc.CompleteSegmentSetParams{
+	if err := qtx.CompleteSegmentSet(ctx, sqlc.CompleteSegmentSetParams{
 		FileSize:    set.FileSize,
 		SampleRate:  int64(set.SampleRate),
 		SampleCount: set.SampleCount,
 		Channels:    int64(set.Channels),
 		InitByteEnd: set.Layout.InitByteEnd,
 		ID:          setID,
-	})
+	}); err != nil {
+		return fmt.Errorf("complete segment set: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // segmentSetIDs maps codec to the row id created by TranscodeVersion.

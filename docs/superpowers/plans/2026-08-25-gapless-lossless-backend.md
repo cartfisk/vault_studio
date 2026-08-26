@@ -96,39 +96,37 @@ Add to the `MODES` object in `index.html`:
 'alac-ranges':   { type: ALAC, files: ['big-alac.mp4'], strategy: 'ranges' },
 ```
 
-Add the strategy implementation alongside the existing ones. It fetches the file in ~1MB slices with `Range` headers, appends each in order, and evicts everything more than 30s behind the playhead:
+Add the strategy implementation alongside the existing ones.
 
-```js
-if (strategy === 'ranges') {
-  sb.mode = 'sequence';
-  const CHUNK = 1024 * 1024;
-  const head = await fetch(files[0], { method: 'HEAD' });
-  const total = Number(head.headers.get('content-length'));
-  log(`total bytes: ${total}`);
+**This step's original snippet was wrong and was corrected during execution.**
+It placed `audio.play()` after the append loop, so `audio.currentTime` stayed 0
+for the loop's whole life and the eviction predicate
+`sb.buffered.start(0) < t - 30` reduced to `buffered.start(0) < -30` — never true
+on a non-negative timeline. Eviction never fired, the loop appended all 37MB into
+a far smaller quota, and the device run failed with `QuotaExceededError` at
+15728640 bytes. The mode was measuring "append the whole file at once", which is
+the failure this design already knew about, rather than progressive append with
+eviction.
 
-  for (let start = 0; start < total; start += CHUNK) {
-    const end = Math.min(start + CHUNK, total) - 1;
-    const res = await fetch(files[0], { headers: { Range: `bytes=${start}-${end}` } });
-    if (res.status !== 206) throw new Error(`expected 206, got ${res.status}`);
-    const buf = await res.arrayBuffer();
+The shipped implementation lives in `frontend/public/mse-spike/index.html` under
+`if (strategy === 'ranges')`. Read it there rather than reproducing it here. Its
+shape:
 
-    try {
-      sb.appendBuffer(buf);
-    } catch (e) {
-      log(`APPEND FAILED at byte ${start}: ${e.name}`);
-      throw e;
-    }
-    await new Promise((r) => sb.addEventListener('updateend', r, { once: true }));
+- `CHUNK` of 1MB, `LEAD_SECONDS` of 30, `START_CHUNKS` of 3.
+- Append `START_CHUNKS` chunks, then `await audio.play()` — playback runs before
+  the steady-state loop begins.
+- Before each later append, wait while `bufferedEnd - currentTime > LEAD_SECONDS`,
+  yielding on `timeupdate` rather than spinning.
+- Evict everything more than `LEAD_SECONDS` behind the playhead, which now fires
+  because `currentTime` advances.
+- `ms.endOfStream()` once, after the final append settles.
+- Log `buffered end` on the `ended` event, since that value is the pass condition.
 
-    const t = audio.currentTime;
-    if (sb.buffered.length && sb.buffered.start(0) < t - 30) {
-      sb.remove(sb.buffered.start(0), t - 30);
-      await new Promise((r) => sb.addEventListener('updateend', r, { once: true }));
-    }
-  }
-  log(`buffered end: ${sb.buffered.end(sb.buffered.length - 1)}`);
-}
-```
+Every `appendBuffer` and `remove` is followed by its `updateend` before the next
+operation; the two must never overlap.
+
+The general lesson, which applies to the client spec too: a buffer-management
+test that appends faster than it plays is not testing buffer management.
 
 - [ ] **Step 3: Serve the harness and run on the target device**
 

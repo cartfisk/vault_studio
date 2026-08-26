@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -136,7 +137,11 @@ func TestScanFragmentsLargeSizeOverflow(t *testing.T) {
 	buf.Write(largeBoxWithSize("mdat", math.MaxInt64-32))
 	data := buf.Bytes()
 
-	if _, err := ScanFragments(bytes.NewReader(data), int64(len(data))); err == nil {
+	_, err := ScanFragments(bytes.NewReader(data), int64(len(data)))
+	if err == nil {
 		t.Fatal("ScanFragments() error = nil, want error for largesize overflow")
+	}
+	if !strings.Contains(err.Error(), "past end of file") {
+		t.Fatalf("ScanFragments() error = %q, want the bounds check to reject it", err)
 	}
 }

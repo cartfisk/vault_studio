@@ -23,6 +23,12 @@
     <button data-mode="alac-trimmed">ALAC, trimmed</button>
     <button data-mode="alac-big">ALAC, 4min (memory)</button>
   </p>
+  <p>
+    <strong>Round two:</strong>
+    <button data-mode="aac-overlap">AAC, overlap</button>
+    <button data-mode="aac-elst">AAC, overlap + edit list</button>
+    <button data-mode="alac-exact">ALAC, exact (no trim)</button>
+  </p>
   <h2>Log</h2>
   <pre id="log"></pre>
 
@@ -64,12 +70,34 @@
     const audio = document.getElementById('player');
     const fixtures = await fetch('./fixtures/fixtures.json').then(r => r.json());
 
+    // strategy:
+    //   'window'   round one — clip each segment with appendWindow. Failed on
+    //              Safari, which clips to the last complete frame and so
+    //              discards real audio.
+    //   'sequence' no trimming at all; the encoder's overshoot plays as audio.
+    //   'overlap'  round two — no clipping. Place each segment earlier by its
+    //              own priming, so the priming lands on top of the previous
+    //              segment's tail and real audio starts on the exact boundary.
+    //              Never asks the browser to cut mid-frame.
+    //   'exact'    round two — no clipping, no compensation, segments placed at
+    //              their true boundaries. Correct only for a format that
+    //              reports its true length, which ALAC now does.
     const MODES = {
-      'aac-untrimmed': { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], trim: false },
-      'aac-trimmed':   { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], trim: true },
-      'alac-trimmed':  { type: ALAC, files: ['h1-alac.mp4', 'h2-alac.mp4'], trim: true },
-      'alac-big':      { type: ALAC, files: ['big-alac.mp4'], trim: false },
+      'aac-untrimmed': { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], strategy: 'sequence' },
+      'aac-trimmed':   { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], strategy: 'window' },
+      'alac-trimmed':  { type: ALAC, files: ['h1-alac.mp4', 'h2-alac.mp4'], strategy: 'window' },
+      'alac-big':      { type: ALAC, files: ['big-alac.mp4'], strategy: 'sequence' },
+
+      'aac-overlap':   { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], strategy: 'overlap' },
+      'aac-elst':      { type: AAC, files: ['h1-aac-elst.mp4', 'h2-aac-elst.mp4'], strategy: 'overlap' },
+      'alac-exact':    { type: ALAC, files: ['h1-alac.mp4', 'h2-alac.mp4'], strategy: 'exact' },
     };
+
+    function primingSeconds(file) {
+      const entry = fixtures.encoded[file];
+      if (!entry) return 0;
+      return entry.overshootSamples / fixtures.sampleRate;
+    }
 
     function ranges(buffered) {
       const out = [];
@@ -85,7 +113,8 @@
     }
 
     async function run(mode) {
-      const { type, files, trim } = MODES[mode];
+      const { type, files, strategy } = MODES[mode];
+      const trim = strategy === 'window';
       log(`\n--- ${mode} ---`);
 
       if (!Impl || !Impl.isTypeSupported(type)) {
@@ -105,7 +134,12 @@
 
       await once(ms, 'sourceopen');
       const sb = ms.addSourceBuffer(type);
-      sb.mode = trim ? 'segments' : 'sequence';
+      sb.mode = strategy === 'sequence' ? 'sequence' : 'segments';
+
+      // An append that fails leaves an unchanged buffered range and nothing
+      // else. On a phone with no inspector attached that is indistinguishable
+      // from success, so say so out loud.
+      sb.addEventListener('error', () => log('  SOURCEBUFFER ERROR'));
 
       for (let i = 0; i < files.length; i++) {
         const buf = await fetch(`./fixtures/${files[i]}`).then(r => r.arrayBuffer());
@@ -123,6 +157,18 @@
           sb.timestampOffset = plan.timestampOffset;
           log(`append ${files[i]} offset=${plan.timestampOffset} ` +
               `window=[${plan.appendWindowStart}, ${plan.appendWindowEnd}]`);
+        } else if (strategy === 'overlap' || strategy === 'exact') {
+          // No append window at all — nothing is clipped, so the browser never
+          // has to cut mid-frame. Placement alone decides where real audio
+          // lands. Under 'overlap' each segment is pulled back by its own
+          // priming so the priming overwrites the previous segment's tail.
+          const priming = strategy === 'overlap' ? primingSeconds(files[i]) : 0;
+          const offset = i * fixtures.trueDurationPerHalf - priming;
+          sb.appendWindowStart = 0;
+          sb.appendWindowEnd = Infinity;
+          sb.timestampOffset = offset;
+          log(`append ${files[i]} offset=${offset.toFixed(6)} ` +
+              `(${strategy}, priming ${(priming * fixtures.sampleRate).toFixed(0)} samples)`);
         } else {
           log(`append ${files[i]} (mode=sequence, no trim)`);
         }

@@ -686,12 +686,18 @@ Served over: <http on LAN | tunnel>
 
 ## Joins
 
-| Mode | Range count | Join audible? | Notes |
-|---|---|---|---|
-| AAC, untrimmed | | | |
-| AAC, trimmed | | | |
-| ALAC, trimmed | | | |
-| ALAC, 4min | | | |
+| Mode | Range count | Final buffered end | Join audible? | Notes |
+|---|---|---|---|---|
+| AAC, untrimmed | | | | |
+| AAC, trimmed | | | | |
+| ALAC, trimmed | | | | |
+| ALAC, 4min | | | | |
+
+Record the final buffered END value, not only the range count. Measured on
+desktop Chrome, both the trimmed and untrimmed AAC joins reported `range
+count: 1` — the untrimmed one still carried 77.5ms of encoder padding as
+inserted audio, visible only as a buffered end of 20.0775 against the trimmed
+run's 20.0000. Range count alone cannot tell a clean join from a padded one.
 
 ## Answers
 

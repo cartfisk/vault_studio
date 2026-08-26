@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MSE codec spike</title>
+  <style>
+    body { font: 16px -apple-system, system-ui, sans-serif; margin: 1rem; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
+    td, th { border: 1px solid #ccc; padding: .4rem; text-align: left; }
+    .yes { color: #0a0; font-weight: 600; }
+    .no { color: #c00; font-weight: 600; }
+    pre { background: #f4f4f4; padding: .5rem; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>MSE codec spike</h1>
+  <table id="support"></table>
+  <h2>Log</h2>
+  <pre id="log"></pre>
+
+  <script type="module">
+    const AAC = 'audio/mp4; codecs="mp4a.40.2"';
+    const ALAC = 'audio/mp4; codecs="alac"';
+
+    const logEl = document.getElementById('log');
+    function log(line) {
+      logEl.textContent += line + '\n';
+    }
+
+    log('user agent: ' + navigator.userAgent);
+
+    const hasManaged = 'ManagedMediaSource' in window;
+    const hasPlain = 'MediaSource' in window;
+    const Impl = window.ManagedMediaSource ?? window.MediaSource;
+
+    const rows = [
+      ['ManagedMediaSource present', hasManaged],
+      ['MediaSource present', hasPlain],
+      ['AAC supported', Impl ? Impl.isTypeSupported(AAC) : false],
+      ['ALAC supported', Impl ? Impl.isTypeSupported(ALAC) : false],
+    ];
+
+    document.getElementById('support').innerHTML =
+      '<tr><th>Check</th><th>Result</th></tr>' +
+      rows.map(([label, ok]) =>
+        `<tr><td>${label}</td><td class="${ok ? 'yes' : 'no'}">${ok}</td></tr>`
+      ).join('');
+
+    for (const [label, ok] of rows) log(`${label}: ${ok}`);
+
+    window.spikeLog = log;
+    window.spikeImpl = Impl;
+    window.spikeTypes = { AAC, ALAC };
+  </script>
+</body>
+</html>

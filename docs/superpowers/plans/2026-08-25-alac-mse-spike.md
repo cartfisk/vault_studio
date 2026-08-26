@@ -228,8 +228,15 @@ In `make-fixtures.sh`, insert this immediately before the final
 cat frontend/public/mse-spike/fixtures/fixtures.json
 ```
 
-Expected: valid JSON whose four `containerDuration` values all exceed
-`trueDurationPerHalf` of 10.0.
+Expected: valid JSON with four `containerDuration` values, each greater than or
+equal to `trueDurationPerHalf` of 10.0.
+
+Do not expect them to be equal to each other, or all to exceed 10.0. Measured on
+this machine, two files holding identical 441000-sample content came out as
+`h1-alac` 10.031020 (padded to 108 frames of 4096) and `h2-alac` 10.000000
+(exact), with `h1-aac` 10.054240 against `h2-aac` 10.023220. That inconsistency
+is the finding, not a fault: container duration cannot be trusted as the true
+content length, which is precisely why this manifest exists.
 
 - [ ] **Step 3: Confirm it parses**
 

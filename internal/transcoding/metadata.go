@@ -97,7 +97,7 @@ func ExtractMetadata(filePath string) (*AudioMetadata, error) {
 				}
 			}
 
-			metadata.IsLossless = isLosslessCodec(stream.CodecName)
+			metadata.IsLossless = IsLosslessCodec(stream.CodecName)
 
 			break
 		}
@@ -106,7 +106,7 @@ func ExtractMetadata(filePath string) (*AudioMetadata, error) {
 	return metadata, nil
 }
 
-func isLosslessCodec(codec string) bool {
+func IsLosslessCodec(codec string) bool {
 	losslessCodecs := map[string]bool{
 		"flac":      true,
 		"alac":      true,

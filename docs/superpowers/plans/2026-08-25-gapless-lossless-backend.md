@@ -23,13 +23,23 @@
 
 ## Prerequisites
 
-`sqlc` is not on `PATH` in this worktree and is not registered as a `go tool` in `go.mod` (only `wgo` is), even though generated code under `internal/db/sqlc/` is checked in. Before Task 1:
+`sqlc` is not on `PATH` in this worktree and is not registered as a `go tool` in
+`go.mod` (only `wgo` is), even though generated code under `internal/db/sqlc/` is
+checked in.
+
+**Always invoke sqlc pinned to the version that produced the checked-in code:**
 
 ```bash
-brew install sqlc
+go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0 generate
 ```
 
-Do not add sqlc to `go.mod` as a tool — that is a repo-wide change outside this plan's scope. If the team later wants it, that is a separate change.
+Do not `brew install sqlc` — Homebrew currently ships v1.31.1, which rewrites the
+version-comment header of every generated file and produces a diff touching 17
+files that have nothing to do with your change. That happened once already during
+execution and had to be reverted by hand.
+
+Do not add sqlc to `go.mod` as a tool, and do not upgrade the pinned version as
+part of this plan. Both are repo-wide changes that deserve their own decision.
 
 Verify ffmpeg is present (8.1.2 confirmed in this environment):
 
@@ -357,7 +367,7 @@ which returns the new version id — use that id rather than a hard-coded `1`.
 - [ ] **Step 3: Run the tests to verify they fail**
 
 ```bash
-go test ./internal/db/ -run TestSegment -v
+go test ./internal/db/ -run 'TestSegment|TestFragment' -v
 ```
 
 Expected: FAIL with `no such table: track_segment_sets`. The migration does not
@@ -405,7 +415,7 @@ The migration runs automatically inside `db.New`, against the fresh temp
 database each test creates.
 
 ```bash
-go test ./internal/db/ -run TestSegment -v
+go test ./internal/db/ -run 'TestSegment|TestFragment' -v
 ```
 
 Expected: PASS, all four tests.
@@ -471,7 +481,7 @@ The backfill query keys on the ALAC set only. Both codecs are written by one job
 - [ ] **Step 7: Generate and build**
 
 ```bash
-sqlc generate && go build ./...
+go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0 generate && go build ./...
 ```
 
 Expected: new methods appear in `internal/db/sqlc/segments.sql.go`, build succeeds.

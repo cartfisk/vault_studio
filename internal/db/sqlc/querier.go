@@ -14,6 +14,7 @@ type Querier interface {
 	ClearAllTracksAnalysis(ctx context.Context) error
 	ClearProjectCover(ctx context.Context, id int64) (Project, error)
 	ClearTrackAnalysis(ctx context.Context, id int64) error
+	CompleteSegmentSet(ctx context.Context, arg CompleteSegmentSetParams) error
 	CountProjectsInFolder(ctx context.Context, folderID sql.NullInt64) (int64, error)
 	CountSubfoldersInFolder(ctx context.Context, parentID sql.NullInt64) (int64, error)
 	CountTrackVersions(ctx context.Context, trackID int64) (int64, error)
@@ -29,6 +30,8 @@ type Querier interface {
 	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) (RefreshToken, error)
 	CreateRemoteTrack(ctx context.Context, arg CreateRemoteTrackParams) (RemoteTrack, error)
 	CreateResetToken(ctx context.Context, arg CreateResetTokenParams) (InviteToken, error)
+	CreateSegmentFragment(ctx context.Context, arg CreateSegmentFragmentParams) error
+	CreateSegmentSet(ctx context.Context, arg CreateSegmentSetParams) (TrackSegmentSet, error)
 	// SHARE ACCESS
 	CreateShareAccess(ctx context.Context, arg CreateShareAccessParams) (ShareAccess, error)
 	// TRACK SHARE TOKENS
@@ -61,6 +64,7 @@ type Querier interface {
 	DeleteProjectShareToken(ctx context.Context, arg DeleteProjectShareTokenParams) error
 	DeleteProjectShareTokenByProject(ctx context.Context, arg DeleteProjectShareTokenByProjectParams) error
 	DeleteRemoteTrack(ctx context.Context, arg DeleteRemoteTrackParams) error
+	DeleteSegmentFragments(ctx context.Context, setID int64) error
 	DeleteShareAccess(ctx context.Context, arg DeleteShareAccessParams) error
 	DeleteShareAccessByShare(ctx context.Context, arg DeleteShareAccessByShareParams) error
 	DeleteShareToken(ctx context.Context, arg DeleteShareTokenParams) error
@@ -81,7 +85,9 @@ type Querier interface {
 	DeleteUserTrackShareByShareID(ctx context.Context, id int64) error
 	DeleteWaveformComment(ctx context.Context, arg DeleteWaveformCommentParams) (int64, error)
 	DeleteWebSocketSession(ctx context.Context, sessionID string) error
+	FailSegmentSet(ctx context.Context, id int64) error
 	FindFileByContentHash(ctx context.Context, contentHash sql.NullString) (TrackFile, error)
+	GetCompletedSegmentSet(ctx context.Context, arg GetCompletedSegmentSetParams) (TrackSegmentSet, error)
 	GetCompletedTrackFile(ctx context.Context, arg GetCompletedTrackFileParams) (TrackFile, error)
 	GetFederationToken(ctx context.Context, token string) (FederationToken, error)
 	GetFederationTokenByID(ctx context.Context, id int64) (FederationToken, error)
@@ -155,6 +161,7 @@ type Querier interface {
 	ListFederationTokensByUser(ctx context.Context, localUserID int64) ([]FederationToken, error)
 	ListFoldersByParent(ctx context.Context, arg ListFoldersByParentParams) ([]Folder, error)
 	ListFoldersByUser(ctx context.Context, userID int64) ([]Folder, error)
+	ListLosslessVersionsMissingSegments(ctx context.Context) ([]ListLosslessVersionsMissingSegmentsRow, error)
 	ListPlainTracksByProject(ctx context.Context, arg ListPlainTracksByProjectParams) ([]Track, error)
 	ListProjectShareTokensByProject(ctx context.Context, projectID int64) ([]ProjectShareToken, error)
 	ListProjectShareTokensByUser(ctx context.Context, userID int64) ([]ProjectShareToken, error)
@@ -167,6 +174,7 @@ type Querier interface {
 	ListRemoteTracksByUser(ctx context.Context, localUserID int64) ([]RemoteTrack, error)
 	ListRootProjects(ctx context.Context, userID int64) ([]ListRootProjectsRow, error)
 	ListRootProjectsWithCustomOrder(ctx context.Context, userID int64) ([]Project, error)
+	ListSegmentFragments(ctx context.Context, setID int64) ([]ListSegmentFragmentsRow, error)
 	ListShareAccessByShare(ctx context.Context, arg ListShareAccessByShareParams) ([]ShareAccess, error)
 	ListShareAccessByUser(ctx context.Context, userID int64) ([]ShareAccess, error)
 	ListShareTokensByTrack(ctx context.Context, trackID int64) ([]ShareToken, error)

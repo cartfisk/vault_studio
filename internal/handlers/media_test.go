@@ -183,3 +183,51 @@ func TestStreamURLPrefersClientCodecOrder(t *testing.T) {
 		})
 	}
 }
+
+// TestStreamURLOmitsGaplessForCrossUserTrack proves that gaplessManifest
+// gates on the calling user's access to the track, not merely on quality.
+// User A calls StreamURL naming user B's track (public id from the URL
+// path). User B's track has a completed lossless set, and BOTH users have
+// their own quality preference set to "lossless" -- if user A's own
+// preference were left at the "lossy" default, this test would pass
+// because of the quality gate, not the access gate, and would keep passing
+// even with the access check deleted.
+func TestStreamURLOmitsGaplessForCrossUserTrack(t *testing.T) {
+	database := testutil.NewDB(t)
+	userA, userB := int64(1), int64(2)
+
+	testutil.SeedTrackForUser(t, database, userA)
+	trackBPublicID, versionB := testutil.SeedTrackForUser(t, database, userB)
+
+	path := filepath.Join(t.TempDir(), "b.mp4")
+	if err := os.WriteFile(path, []byte("user-b-alac-fragment-bytes"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	testutil.SeedCompletedSegmentSet(t, database, versionB, "alac", path)
+	testutil.SetUserQuality(t, database, userB, "lossless")
+	testutil.SetUserQuality(t, database, userA, "lossless")
+
+	h := handlers.NewMediaHandler(testAuthConfig(), database)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/media/stream/"+trackBPublicID+"?codecs=alac,flac", nil)
+	req.SetPathValue("id", trackBPublicID)
+	req = withUser(req, userA)
+
+	rec := httptest.NewRecorder()
+	if err := h.StreamURL(rec, req); err != nil {
+		t.Fatalf("StreamURL() error = %v", err)
+	}
+
+	payload := decodeResultObject(t, rec)
+
+	keys := make([]string, 0, len(payload))
+	for k := range payload {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	if len(keys) != 1 || keys[0] != "url" {
+		t.Fatalf("response keys = %v, want [url] (gapless metadata leaked to a user without access)", keys)
+	}
+}

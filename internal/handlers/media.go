@@ -11,6 +11,7 @@ import (
 	"bungleware/vault/internal/auth"
 	"bungleware/vault/internal/db"
 	sqlc "bungleware/vault/internal/db/sqlc"
+	"bungleware/vault/internal/handlers/tracks"
 	"bungleware/vault/internal/httputil"
 	"bungleware/vault/internal/middleware"
 )
@@ -104,6 +105,17 @@ func (h *MediaHandler) gaplessManifest(r *http.Request, trackID, requestedQualit
 
 	track, err := h.db.Queries.GetTrackByPublicIDNoFilter(ctx, trackID)
 	if err != nil {
+		return nil
+	}
+
+	// StreamURL never calls CheckTrackAccess itself: it relies on the
+	// downstream signed/session-authenticated routes to gate the actual
+	// bytes. The gapless manifest is different — it hands back the
+	// track's sample count, channel count, and fragment layout directly
+	// in this response, so it needs its own gate. Fail closed on any
+	// error from the check itself.
+	access, err := tracks.CheckTrackAccess(ctx, h.db, track.ID, track.ProjectID, int64(userID))
+	if err != nil || !access.HasAccess {
 		return nil
 	}
 

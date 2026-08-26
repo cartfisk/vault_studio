@@ -336,14 +336,14 @@ Create `frontend/public/mse-spike/index.html`:
 cd frontend && npm run dev
 ```
 
-Open `http://localhost:5173/mse-spike/`. Expected on desktop Chrome:
+Open `http://localhost:3000/mse-spike/`. Expected on desktop Chrome:
 `MediaSource present: true` and `AAC supported: true`. `ManagedMediaSource
 present` will be `false` — correct and expected off Safari.
 
 - [ ] **Step 3: Check on the phone**
 
 With the dev server still running, find the LAN address it prints and open
-`http://<lan-ip>:5173/mse-spike/` on the iPhone.
+`http://<lan-ip>:3000/mse-spike/` on the iPhone.
 
 **This step answers question 1.** Record all four booleans verbatim; they go
 into the results document in Task 6. If `ALAC supported` is `false` on the
@@ -596,7 +596,7 @@ Append this to the end of the same `<script type="module">`, after the
 
 - [ ] **Step 4: Smoke test the trimmed join on desktop**
 
-Reload `http://localhost:5173/mse-spike/` and press **AAC, trimmed**.
+Reload `http://localhost:3000/mse-spike/` and press **AAC, trimmed**.
 
 Expected: the log prints two appends, then `range count: 1`, and a continuous
 440Hz tone plays for 20 seconds. A `range count` of 2 means the appends did not
@@ -637,7 +637,7 @@ The spike's actual deliverable. Nothing here is code.
 cd frontend && npm run dev
 ```
 
-Open `http://<lan-ip>:5173/mse-spike/` on the iPhone (Safari 26+). If the page
+Open `http://<lan-ip>:3000/mse-spike/` on the iPhone (Safari 26+). If the page
 fails to attach the MediaSource over plain HTTP, note it and retry over a
 tunnel — that is itself a finding worth recording.
 

@@ -33,3 +33,6 @@ __pycache__/
 
 # Throwaway MSE spike fixtures (regenerate with make-fixtures.sh)
 frontend/public/mse-spike/fixtures/
+
+# Throwaway Gapless-5 evaluation fixtures (regenerate with ffmpeg)
+frontend/public/gapless5-test/fixtures/

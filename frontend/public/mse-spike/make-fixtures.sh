@@ -39,6 +39,17 @@ for half in h1 h2; do
     -movflags "$frag_elst" -f mp4 "$out/$half-alac-elst.mp4"
 done
 
+# CMAF segments via the dash muxer. Unlike the +empty_moov files, the init
+# segment these produce carries an `elst` edit-list box — the encoder priming
+# metadata that "gapless AAC" relies on. This is the one mechanism client-side
+# trimming could not reach: whether Safari honours that edit list through MSE.
+for half in h1 h2; do
+  rm -rf "$out/cmaf-$half"
+  mkdir -p "$out/cmaf-$half"
+  ffmpeg -v error -i "$out/$half.wav" -c:a aac -b:a 256k \
+    -f dash -single_file 0 -use_timeline 0 "$out/cmaf-$half/out.mpd"
+done
+
 # A pure tone compresses to almost nothing in ALAC, which would not exercise
 # the memory question at all. Noise is incompressible, so this approximates a
 # real lossless track's buffer footprint.

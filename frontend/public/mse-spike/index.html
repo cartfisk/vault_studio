@@ -30,6 +30,7 @@
     <button data-mode="aac-elst">AAC, overlap + edit list</button>
     <button data-mode="alac-exact">ALAC, exact (no trim)</button>
     <button data-mode="aac-exact">AAC, exact (no trim)</button>
+    <button data-mode="aac-cmaf">AAC, CMAF + edit list</button>
   </p>
   <h2>Log</h2>
   <pre id="log"></pre>
@@ -95,6 +96,18 @@
       'aac-elst':      { type: AAC, files: ['h1-aac-elst.mp4', 'h2-aac-elst.mp4'], strategy: 'overlap' },
       'alac-exact':    { type: ALAC, files: ['h1-alac.mp4', 'h2-alac.mp4'], strategy: 'exact' },
       'aac-exact':     { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], strategy: 'exact' },
+
+      // CMAF: each segment is an init (carrying the elst edit list) plus a
+      // media chunk. Nothing is trimmed and nothing is shifted — if Safari
+      // honours the edit list, it removes the priming itself.
+      'aac-cmaf': {
+        type: AAC,
+        strategy: 'cmaf',
+        segments: [
+          { init: 'cmaf-h1/init-stream0.m4s', media: 'cmaf-h1/chunk-stream0-00001.m4s' },
+          { init: 'cmaf-h2/init-stream0.m4s', media: 'cmaf-h2/chunk-stream0-00001.m4s' },
+        ],
+      },
     };
 
     function primingSeconds(file) {
@@ -138,6 +151,35 @@
 
       await once(ms, 'sourceopen');
       const sb = ms.addSourceBuffer(type);
+
+      if (strategy === 'cmaf') {
+        sb.mode = 'segments';
+        sb.addEventListener('error', () => log('  SOURCEBUFFER ERROR'));
+        const { segments } = MODES[mode];
+        for (let i = 0; i < segments.length; i++) {
+          for (const part of ['init', 'media']) {
+            const path = segments[i][part];
+            const buf = await fetch(`./fixtures/${path}`).then(r => r.arrayBuffer());
+            if (part === 'media') {
+              // No append window, no priming compensation. Placement only —
+              // the edit list is meant to account for the priming itself.
+              sb.timestampOffset = i * fixtures.trueDurationPerHalf;
+              log(`append ${path} offset=${(i * fixtures.trueDurationPerHalf).toFixed(6)}`);
+            } else {
+              log(`append ${path} (init)`);
+            }
+            sb.appendBuffer(buf);
+            await once(sb, 'updateend');
+          }
+          log(`  buffered: ${ranges(sb.buffered)}`);
+        }
+        ms.endOfStream();
+        log(`final buffered: ${ranges(sb.buffered)}`);
+        log(`range count: ${sb.buffered.length} (1 = joined, 2 = seam)`);
+        await audio.play();
+        return;
+      }
+
       sb.mode = strategy === 'sequence' ? 'sequence' : 'segments';
 
       // An append that fails leaves an unchanged buffered range and nothing

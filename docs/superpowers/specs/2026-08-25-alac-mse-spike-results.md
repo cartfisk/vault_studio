@@ -165,16 +165,33 @@ no encoder-priming or padding columns, no trim arithmetic in the client, and no
 CMAF edit-list dependency. The client places segments at running offsets and
 does nothing else.
 
-**Cost lever.** ALAC and FLAC are both lossless, so they are inter-convertible
-without generation loss, and one can be derived from the other on demand rather
-than both being stored forever. FLAC into fragmented MP4 is a stream copy
-(`-c:a copy`), not a re-encode, so a FLAC source reaches the Chrome tier by
-repackaging alone. ALAC requires a real encode, but from a lossless source it is
-still bit-exact.
+**Packaging, decided: prefer stream copy.** FLAC into fragmented MP4 is a
+remux (`-c:a copy`), verified, not a re-encode — a FLAC upload reaches the
+FLAC tier by repackaging alone, at negligible CPU cost and with the samples
+untouched. Encode only where the source format leaves no choice: a WAV upload
+must be encoded to FLAC, and ALAC always requires a real encode unless the
+source is already ALAC. Every such encode is lossless, so no generation loss
+accumulates regardless of path.
 
-**Unknown:** Firefox was not tested. It supports FLAC in MP4 for MSE in recent
-versions, which would put it on the same tier as Chrome, but this is unverified
-and should be measured before it is assumed.
+Open, and deliberately left to the implementation spec: whether both tiers are
+stored per version, or one is stored and the other derived on demand and cached.
+"Prefer stream copy" settles how each tier is produced, not how many are kept.
+Storing both roughly doubles lossless storage per version; deriving on demand
+trades that for CPU and a cold-start path. Decide it with real library size
+numbers rather than in the abstract.
+
+**Firefox: verified working with FLAC.** FLAC therefore covers Chrome and
+Firefox; ALAC covers Safari on both iOS and desktop. Between them the three
+engines are served.
+
+**Browser scope, decided:** Safari, Chrome and Firefox are the supported set.
+Anything else falls back to the MP3 tier, which means a browser supporting
+neither lossless codec plays lossy audio regardless of the user's quality
+preference. That is accepted behaviour, not a bug to design around.
+
+**Codec selection is by capability, never by user agent.** Ask
+`isTypeSupported` for ALAC, then FLAC, then fall back to MP3. A user-agent
+string would break the moment any engine gains support for the other codec.
 
 **Unchanged by this decision:** the quota failure still applies. A whole-file
 lossless append is refused on iOS at 39MB, so the lossless tiers still require

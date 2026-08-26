@@ -14,8 +14,8 @@ type Fragment struct {
 }
 
 // FragmentLayout is the measured structure of a fragmented MP4.
-// InitByteEnd is the inclusive end of the ftyp+moov prelude, which a client
-// appends once before any fragment.
+// InitByteEnd is the inclusive end of the file content before the first moof,
+// which a client appends once before any fragment.
 type FragmentLayout struct {
 	InitByteEnd int64
 	Fragments   []Fragment
@@ -61,7 +61,7 @@ func ScanFragments(r io.ReaderAt, size int64) (FragmentLayout, error) {
 			return layout, fmt.Errorf("box at %d claims %d bytes, minimum is 8", offset, boxSize)
 		}
 
-		if offset+boxSize > size {
+		if boxSize > size-offset {
 			return layout, fmt.Errorf(
 				"box %q at %d claims %d bytes, past end of file at %d",
 				boxType, offset, boxSize, size,

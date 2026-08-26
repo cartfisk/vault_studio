@@ -3,6 +3,7 @@ package transcoding
 import (
 	"bytes"
 	"encoding/binary"
+	"math"
 	"testing"
 )
 
@@ -20,6 +21,15 @@ func largeBox(typ string, payloadLen int) []byte {
 	binary.BigEndian.PutUint32(b[0:4], 1)
 	copy(b[4:8], typ)
 	binary.BigEndian.PutUint64(b[8:16], uint64(16+payloadLen))
+	return b
+}
+
+// largeBoxWithSize builds a 64-bit-largesize MP4 box with a specific size field.
+func largeBoxWithSize(typ string, size uint64) []byte {
+	b := make([]byte, 16)
+	binary.BigEndian.PutUint32(b[0:4], 1)
+	copy(b[4:8], typ)
+	binary.BigEndian.PutUint64(b[8:16], size)
 	return b
 }
 
@@ -115,5 +125,18 @@ func TestScanFragmentsUndersizedBox(t *testing.T) {
 
 	if _, err := ScanFragments(bytes.NewReader(b), int64(len(b))); err == nil {
 		t.Fatal("ScanFragments() error = nil, want error for undersized box")
+	}
+}
+
+func TestScanFragmentsLargeSizeOverflow(t *testing.T) {
+	var buf bytes.Buffer
+	buf.Write(box("ftyp", 8))
+	buf.Write(box("moov", 8))
+	buf.Write(box("moof", 8))
+	buf.Write(largeBoxWithSize("mdat", math.MaxInt64-32))
+	data := buf.Bytes()
+
+	if _, err := ScanFragments(bytes.NewReader(data), int64(len(data))); err == nil {
+		t.Fatal("ScanFragments() error = nil, want error for largesize overflow")
 	}
 }

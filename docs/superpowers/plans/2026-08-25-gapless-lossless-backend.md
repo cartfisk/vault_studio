@@ -186,43 +186,10 @@ git commit -m "Add byte-range append modes to the MSE harness
 - Produces:
   - Tables `track_segment_sets`, `track_segment_fragments`
   - `testutil.NewDB(t *testing.T) *db.DB`
+  - `testutil.SeedVersion(t *testing.T, database *db.DB) int64`
   - sqlc methods: `CreateSegmentSet`, `CompleteSegmentSet`, `FailSegmentSet`, `DeleteSegmentFragments`, `CreateSegmentFragment`, `GetCompletedSegmentSet`, `ListSegmentFragments`, `ListLosslessVersionsMissingSegments`
 
-- [ ] **Step 1: Write the migration**
-
-Create `migrations/036_add_gapless_segments.sql`:
-
-```sql
-CREATE TABLE track_segment_sets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    version_id INTEGER NOT NULL REFERENCES track_versions(id) ON DELETE CASCADE,
-    codec TEXT NOT NULL CHECK (codec IN ('alac', 'flac')),
-    file_path TEXT NOT NULL,
-    file_size INTEGER NOT NULL DEFAULT 0,
-    sample_rate INTEGER NOT NULL DEFAULT 0,
-    sample_count INTEGER NOT NULL DEFAULT 0,
-    channels INTEGER NOT NULL DEFAULT 0,
-    init_byte_end INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (version_id, codec)
-);
-
-CREATE TABLE track_segment_fragments (
-    set_id INTEGER NOT NULL REFERENCES track_segment_sets(id) ON DELETE CASCADE,
-    idx INTEGER NOT NULL,
-    byte_start INTEGER NOT NULL,
-    byte_end INTEGER NOT NULL,
-    PRIMARY KEY (set_id, idx),
-    CHECK (byte_end >= byte_start)
-);
-
-CREATE INDEX idx_track_segment_sets_version
-ON track_segment_sets(version_id, status);
-```
-
-- [ ] **Step 2: Write the test helper**
+- [ ] **Step 1: Write the test helpers**
 
 Create `internal/testutil/db.go`:
 
@@ -264,7 +231,28 @@ func NewDB(t *testing.T) *db.DB {
 
 Resolving migrations from the source file's own location rather than a relative path means the helper works from any package's test directory.
 
-- [ ] **Step 3: Write the failing schema test**
+In the same step, add the seeding helper the tests need. Read the parent
+schemas first — the insert must supply every `NOT NULL` column those tables
+declare:
+
+```bash
+awk '/CREATE TABLE (projects|tracks|track_versions)/,/^\);/' migrations/001_initial_schema.sql
+```
+
+```go
+// SeedVersion inserts the minimum project/track/version chain a
+// track_versions foreign key needs, and returns the new version id.
+func SeedVersion(t *testing.T, database *db.DB) int64 {
+	t.Helper()
+	// Insert a project, then a track, then a version, supplying every
+	// NOT NULL column the schemas above declare. Return the version id.
+}
+```
+
+Write it complete — a seeding helper that seeds nothing makes every test that
+calls it vacuous, and the tests in the next step depend on the rows existing.
+
+- [ ] **Step 2: Write the schema tests**
 
 Create `internal/db/segments_test.go`:
 
@@ -360,39 +348,61 @@ func TestFragmentRejectsInvertedRange(t *testing.T) {
 		t.Fatal("byte_end < byte_start was accepted, want CHECK violation")
 	}
 }
-
-// mustSeedVersion creates the minimum rows a track_version foreign key needs.
-func mustSeedVersion(t *testing.T, database interface {
-	Exec(string, ...any) (sql.Result, error)
-}, versionID int64) {
-	t.Helper()
-	// Implemented in Step 4 once the exact parent-table columns are confirmed.
-}
 ```
 
-`mustSeedVersion` is finished in the next step — writing it requires reading the parent tables' `NOT NULL` columns, which is a separate action.
+Every test calls `testutil.SeedVersion`, written complete in Step 1. Replace the
+local `mustSeedVersion(t, database, 1)` calls with `testutil.SeedVersion(t, database)`,
+which returns the new version id — use that id rather than a hard-coded `1`.
 
-- [ ] **Step 4: Finish the seed helper**
-
-Read the parent schemas:
-
-```bash
-awk '/CREATE TABLE (projects|tracks|track_versions)/,/^\);/' migrations/001_initial_schema.sql
-```
-
-Replace the stub with a real implementation that inserts a project, a track, and a version, supplying every `NOT NULL` column those tables declare. Add `"database/sql"` to the imports. Change the parameter type to `*db.DB` and import `bungleware/vault/internal/db`.
-
-- [ ] **Step 5: Run the tests to verify they fail**
+- [ ] **Step 3: Run the tests to verify they fail**
 
 ```bash
 go test ./internal/db/ -run TestSegment -v
 ```
 
-Expected: FAIL — `no such table: track_segment_sets`, because the migration has not been applied to a fresh temp database yet. If it passes here, the migration file is being picked up and you can skip to Step 6.
+Expected: FAIL with `no such table: track_segment_sets`. The migration does not
+exist yet, which is why this step comes before it — `db.New` applies migrations
+automatically, so writing the migration first would make these tests pass
+immediately and there would be no red step at all.
 
-- [ ] **Step 6: Run again to confirm the migration applies**
+- [ ] **Step 4: Write the migration**
 
-The migration runs automatically inside `db.New`. Re-run:
+Create `migrations/036_add_gapless_segments.sql`:
+
+```sql
+CREATE TABLE track_segment_sets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_id INTEGER NOT NULL REFERENCES track_versions(id) ON DELETE CASCADE,
+    codec TEXT NOT NULL CHECK (codec IN ('alac', 'flac')),
+    file_path TEXT NOT NULL,
+    file_size INTEGER NOT NULL DEFAULT 0,
+    sample_rate INTEGER NOT NULL DEFAULT 0,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    channels INTEGER NOT NULL DEFAULT 0,
+    init_byte_end INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (version_id, codec)
+);
+
+CREATE TABLE track_segment_fragments (
+    set_id INTEGER NOT NULL REFERENCES track_segment_sets(id) ON DELETE CASCADE,
+    idx INTEGER NOT NULL,
+    byte_start INTEGER NOT NULL,
+    byte_end INTEGER NOT NULL,
+    PRIMARY KEY (set_id, idx),
+    CHECK (byte_end >= byte_start)
+);
+
+CREATE INDEX idx_track_segment_sets_version
+ON track_segment_sets(version_id, status);
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+The migration runs automatically inside `db.New`, against the fresh temp
+database each test creates.
 
 ```bash
 go test ./internal/db/ -run TestSegment -v
@@ -400,7 +410,7 @@ go test ./internal/db/ -run TestSegment -v
 
 Expected: PASS, all four tests.
 
-- [ ] **Step 7: Write the sqlc queries**
+- [ ] **Step 6: Write the sqlc queries**
 
 Create `internal/db/queries/segments.sql`:
 
@@ -458,7 +468,7 @@ ORDER BY tv.id;
 
 The backfill query keys on the ALAC set only. Both codecs are written by one job, so an ALAC set at `completed` implies the FLAC set reached the same state.
 
-- [ ] **Step 8: Generate and build**
+- [ ] **Step 7: Generate and build**
 
 ```bash
 sqlc generate && go build ./...
@@ -466,7 +476,7 @@ sqlc generate && go build ./...
 
 Expected: new methods appear in `internal/db/sqlc/segments.sql.go`, build succeeds.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add migrations/036_add_gapless_segments.sql internal/db/queries/segments.sql \
@@ -480,7 +490,6 @@ git commit -m "Add segment set and fragment tables
 ```
 
 ---
-
 ## Task 2: MP4 fragment box walker
 
 **Files:**
@@ -1279,7 +1288,8 @@ func TestTranscodeVersionCreatesPendingSetsForLosslessSource(t *testing.T) {
 }
 ```
 
-Move `mustSeedVersion` from `internal/db/segments_test.go` into `internal/testutil` as an exported `SeedVersion(t *testing.T, database *db.DB) int64` returning the new version id, and update the Task 1 tests to call it. Two packages need it now, which is what justifies the move.
+`testutil.SeedVersion` already exists — Task 1 created it. Use it as-is; do not
+write a second seeding helper in this package.
 
 - [ ] **Step 2: Run the test to verify it fails**
 

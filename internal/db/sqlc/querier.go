@@ -175,6 +175,7 @@ type Querier interface {
 	ListRootProjects(ctx context.Context, userID int64) ([]ListRootProjectsRow, error)
 	ListRootProjectsWithCustomOrder(ctx context.Context, userID int64) ([]Project, error)
 	ListSegmentFragments(ctx context.Context, setID int64) ([]ListSegmentFragmentsRow, error)
+	ListSegmentSetsForVersion(ctx context.Context, versionID int64) ([]ListSegmentSetsForVersionRow, error)
 	ListShareAccessByShare(ctx context.Context, arg ListShareAccessByShareParams) ([]ShareAccess, error)
 	ListShareAccessByUser(ctx context.Context, userID int64) ([]ShareAccess, error)
 	ListShareTokensByTrack(ctx context.Context, trackID int64) ([]ShareToken, error)
@@ -203,6 +204,7 @@ type Querier interface {
 	ListWaveformCommentsByVersion(ctx context.Context, versionID int64) ([]WaveformComment, error)
 	ListWebSocketSessionsByResource(ctx context.Context, arg ListWebSocketSessionsByResourceParams) ([]WebsocketSession, error)
 	MarkCoverProcessed(ctx context.Context, id int64) error
+	MarkSegmentSetProcessing(ctx context.Context, id int64) error
 	MarkTokenAsUsed(ctx context.Context, id int64) (InviteToken, error)
 	RevokeRefreshToken(ctx context.Context, id int64) error
 	RevokeRefreshTokensByUser(ctx context.Context, userID int64) error

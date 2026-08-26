@@ -229,6 +229,7 @@ func (h *TracksHandler) UploadTrack(w http.ResponseWriter, r *http.Request) erro
 			SourceFilePath: saveResult.Path,
 			TrackPublicID:  track.PublicID,
 			UserID:         int64(userID),
+			SourceCodec:    metadata.Codec,
 		})
 		if err != nil {
 			slog.Debug("failed to queue transcoding", "error", err)

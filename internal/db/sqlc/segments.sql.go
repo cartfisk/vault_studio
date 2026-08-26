@@ -220,3 +220,44 @@ func (q *Queries) ListSegmentFragments(ctx context.Context, setID int64) ([]List
 	}
 	return items, nil
 }
+
+const listSegmentSetsForVersion = `-- name: ListSegmentSetsForVersion :many
+SELECT id, codec FROM track_segment_sets WHERE version_id = ?
+`
+
+type ListSegmentSetsForVersionRow struct {
+	ID    int64  `json:"id"`
+	Codec string `json:"codec"`
+}
+
+func (q *Queries) ListSegmentSetsForVersion(ctx context.Context, versionID int64) ([]ListSegmentSetsForVersionRow, error) {
+	rows, err := q.db.QueryContext(ctx, listSegmentSetsForVersion, versionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSegmentSetsForVersionRow{}
+	for rows.Next() {
+		var i ListSegmentSetsForVersionRow
+		if err := rows.Scan(&i.ID, &i.Codec); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markSegmentSetProcessing = `-- name: MarkSegmentSetProcessing :exec
+UPDATE track_segment_sets SET status = 'processing' WHERE id = ?
+`
+
+func (q *Queries) MarkSegmentSetProcessing(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, markSegmentSetProcessing, id)
+	return err
+}

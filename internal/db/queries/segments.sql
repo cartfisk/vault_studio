@@ -20,6 +20,12 @@ WHERE id = ?;
 -- name: FailSegmentSet :exec
 UPDATE track_segment_sets SET status = 'failed' WHERE id = ?;
 
+-- name: MarkSegmentSetProcessing :exec
+UPDATE track_segment_sets SET status = 'processing' WHERE id = ?;
+
+-- name: ListSegmentSetsForVersion :many
+SELECT id, codec FROM track_segment_sets WHERE version_id = ?;
+
 -- name: DeleteSegmentFragments :exec
 DELETE FROM track_segment_fragments WHERE set_id = ?;
 

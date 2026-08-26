@@ -135,6 +135,51 @@ append is not viable for the lossless tier.
 A full-length AAC append (~8MB for 4 minutes at 256k) was not tested; the
 decision below made it moot.
 
+## Final codec matrix and decision
+
+Measured on the devices named above.
+
+| Codec in fMP4 | Safari 26.6 (iOS) | Chrome 151 | Join with placement only |
+|---|---|---|---|
+| ALAC | supported | unsupported | gapless on Safari |
+| FLAC | unsupported | supported | gapless on Chrome |
+| AAC | supported | supported | clicks everywhere |
+
+ALAC and FLAC are an exact mirror image: each engine supports one and rejects
+the other. No single lossless codec covers both.
+
+Both are gapless for the same structural reason. Neither is a transform codec,
+so neither carries encoder priming, so nothing ever needs trimming and the
+frame-granularity limit that defeated AAC never applies. Both report an
+overshoot of exactly 0 samples.
+
+**Decided:**
+
+- **Lossy playback stays MP3, with today's seam.** AAC is abandoned. Gapless is
+  a lossless-mode feature.
+- **Lossless playback is gapless**, using ALAC on Safari and FLAC on Chrome,
+  selected by codec support rather than by user agent.
+
+This removes a large amount of previously planned work: no AAC transcode tier,
+no encoder-priming or padding columns, no trim arithmetic in the client, and no
+CMAF edit-list dependency. The client places segments at running offsets and
+does nothing else.
+
+**Cost lever.** ALAC and FLAC are both lossless, so they are inter-convertible
+without generation loss, and one can be derived from the other on demand rather
+than both being stored forever. FLAC into fragmented MP4 is a stream copy
+(`-c:a copy`), not a re-encode, so a FLAC source reaches the Chrome tier by
+repackaging alone. ALAC requires a real encode, but from a lossless source it is
+still bit-exact.
+
+**Unknown:** Firefox was not tested. It supports FLAC in MP4 for MSE in recent
+versions, which would put it on the same tier as Chrome, but this is unverified
+and should be measured before it is assumed.
+
+**Unchanged by this decision:** the quota failure still applies. A whole-file
+lossless append is refused on iOS at 39MB, so the lossless tiers still require
+pre-segmented delivery.
+
 ## Consequences for the implementation spec
 
 **Approach A is dropped for both tiers.** Decided after the quota failure.
@@ -152,21 +197,15 @@ append windows, no priming compensation, no trim arithmetic in the client — th
 backend records true sample counts and the client places segments at running
 offsets.
 
-**The lossy tier is unresolved and has three exits.** In preference order:
+**The lossy tier keeps its seam, by decision.** MP3 remains the lossy codec and
+gapless is a lossless-mode feature. AAC is abandoned rather than pursued through
+CMAF: five client-side strategies were tested and the frame-granularity limit
+defeats all of them, and the remaining mechanism would have made the lossy tier
+the most complicated part of the system to serve the case where quality matters
+least.
 
-1. **CMAF with preserved edit lists.** Costs nothing extra, because approach B
-   builds CMAF segments regardless. Prove it during B's implementation with the
-   harness still in the tree; if Safari honours the edit list, AAC is gapless
-   for free.
-2. **Ship gapless on lossless only.** ALAC works today. The lossy tier keeps
-   today's seam and the player degrades by quality preference rather than
-   failing. Costs nothing to build and is the natural fallback if (1) fails.
-3. **Serve ALAC to everyone.** Removes the problem by removing AAC, at roughly
-   5-10x the bandwidth per stream. Only worth considering if gapless matters
-   more than data usage, which for a mobile listener it likely does not.
-
-Do not build a client-side AAC trimming path. Four variants were tested and the
-frame-granularity limit defeats all of them; a fifth is unlikely to differ.
+Do not build a client-side AAC trimming path, and do not revisit AAC without a
+reason that outweighs a working MP3 tier.
 
 **Carried forward regardless of mechanism:**
 

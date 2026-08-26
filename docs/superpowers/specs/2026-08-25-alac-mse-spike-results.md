@@ -180,6 +180,28 @@ and should be measured before it is assumed.
 lossless append is refused on iOS at 39MB, so the lossless tiers still require
 pre-segmented delivery.
 
+## Evaluated and rejected: Gapless-5
+
+The [Gapless-5](https://github.com/regosen/Gapless-5) library was tried off the
+shelf, playing the same 1s + 1s split in MP3, FLAC and WAV.
+
+Rejected on the same grounds the original design gave for Web Audio generally:
+it costs AirPlay and background playback on iOS Safari. This is not a subtlety
+to be engineered around — the library's own README states that `useWebAudio`
+must be `false` for audio to continue in the background on iOS, and
+`useWebAudio` is the setting that provides the gapless. The two requirements are
+the same switch in opposite positions. No MediaSession or lock-screen support is
+documented.
+
+For a music player, losing the lock screen and AirPlay is a worse regression
+than a seam between tracks.
+
+Recorded for accuracy: in this test every format seamed, including WAV. WAV has
+no codec and no priming, so a clean WAV join should be automatic; its failure
+means the library was not achieving gapless playback in this configuration at
+all, and the MP3 and FLAC results here are therefore not a fair assessment of
+the library. The rejection does not rest on those results.
+
 ## Consequences for the implementation spec
 
 **Approach A is dropped for both tiers.** Decided after the quota failure.

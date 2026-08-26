@@ -26,6 +26,7 @@
   <p>
     <strong>Round two:</strong>
     <button data-mode="aac-overlap">AAC, overlap</button>
+    <button data-mode="aac-headtrim">AAC, head trim</button>
     <button data-mode="aac-elst">AAC, overlap + edit list</button>
     <button data-mode="alac-exact">ALAC, exact (no trim)</button>
   </p>
@@ -89,6 +90,7 @@
       'alac-big':      { type: ALAC, files: ['big-alac.mp4'], strategy: 'sequence' },
 
       'aac-overlap':   { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], strategy: 'overlap' },
+      'aac-headtrim':  { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], strategy: 'headtrim' },
       'aac-elst':      { type: AAC, files: ['h1-aac-elst.mp4', 'h2-aac-elst.mp4'], strategy: 'overlap' },
       'alac-exact':    { type: ALAC, files: ['h1-alac.mp4', 'h2-alac.mp4'], strategy: 'exact' },
     };
@@ -157,6 +159,24 @@
           sb.timestampOffset = plan.timestampOffset;
           log(`append ${files[i]} offset=${plan.timestampOffset} ` +
               `window=[${plan.appendWindowStart}, ${plan.appendWindowEnd}]`);
+        } else if (strategy === 'headtrim') {
+          // Overlap alone leaves a notch: the next segment is pulled back by
+          // its full 1024-sample priming, but the previous segment's tail
+          // padding is only 344 samples, so 680 samples of real audio get
+          // overwritten with the incoming segment's silence.
+          //
+          // Clip the priming off the HEAD instead. Priming is exactly one AAC
+          // frame, so this cut lands on a frame boundary — the thing Safari
+          // refused to do at the tail, where the cut fell mid-frame. The tail
+          // is never clipped; the next segment's real audio overwrites it.
+          const priming = primingSeconds(files[i]);
+          const boundary = i * fixtures.trueDurationPerHalf;
+          sb.appendWindowEnd = Infinity;
+          sb.appendWindowStart = boundary;
+          sb.timestampOffset = boundary - priming;
+          log(`append ${files[i]} offset=${(boundary - priming).toFixed(6)} ` +
+              `headtrim from ${boundary.toFixed(6)} ` +
+              `(priming ${(priming * fixtures.sampleRate).toFixed(0)} samples)`);
         } else if (strategy === 'overlap' || strategy === 'exact') {
           // No append window at all — nothing is clipped, so the browser never
           // has to cut mid-frame. Placement alone decides where real audio

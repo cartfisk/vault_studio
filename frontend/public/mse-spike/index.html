@@ -33,6 +33,12 @@
     <button data-mode="aac-exact">AAC, exact (no trim)</button>
     <button data-mode="aac-cmaf">AAC, CMAF + edit list</button>
   </p>
+  <p>
+    <strong>Round three (byte-range delivery):</strong>
+    <button data-mode="alac-ranges">ALAC, 4min via ranges</button>
+    <button data-mode="alac-range-join">ALAC, range join</button>
+    <button data-mode="flac-range-join">FLAC, range join</button>
+  </p>
   <h2>Log</h2>
   <pre id="log"></pre>
 
@@ -88,6 +94,13 @@
     //   'exact'    round two — no clipping, no compensation, segments placed at
     //              their true boundaries. Correct only for a format that
     //              reports its true length, which ALAC now does.
+    //   'ranges'   round three — fetches one file in ~1MB Range requests and
+    //              appends each slice in order, evicting anything more than
+    //              30s behind the playhead. Proves progressive byte-range
+    //              delivery doesn't exhaust the buffer quota.
+    //   'range-join' round three — same placement as 'exact', but each file
+    //              arrives as two Range requests instead of one whole-file
+    //              fetch. Proves the join survives the delivery change.
     const MODES = {
       'aac-untrimmed': { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], strategy: 'sequence' },
       'aac-trimmed':   { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], strategy: 'window' },
@@ -112,6 +125,10 @@
           { init: 'cmaf-h2/init-stream0.m4s', media: 'cmaf-h2/chunk-stream0-00001.m4s' },
         ],
       },
+
+      'alac-ranges':     { type: ALAC, files: ['big-alac.mp4'], strategy: 'ranges' },
+      'alac-range-join': { type: ALAC, files: ['h1-alac.mp4', 'h2-alac.mp4'], strategy: 'range-join' },
+      'flac-range-join': { type: FLAC, files: ['h1-flac.mp4', 'h2-flac.mp4'], strategy: 'range-join' },
     };
 
     function primingSeconds(file) {
@@ -184,6 +201,42 @@
         return;
       }
 
+      if (strategy === 'ranges') {
+        sb.mode = 'sequence';
+        sb.addEventListener('error', () => log('  SOURCEBUFFER ERROR'));
+        const CHUNK = 1024 * 1024;
+        const head = await fetch(`./fixtures/${files[0]}`, { method: 'HEAD' });
+        const total = Number(head.headers.get('content-length'));
+        log(`total bytes: ${total}`);
+
+        for (let start = 0; start < total; start += CHUNK) {
+          const end = Math.min(start + CHUNK, total) - 1;
+          const res = await fetch(`./fixtures/${files[0]}`, {
+            headers: { Range: `bytes=${start}-${end}` },
+          });
+          if (res.status !== 206) throw new Error(`expected 206, got ${res.status}`);
+          const buf = await res.arrayBuffer();
+
+          try {
+            sb.appendBuffer(buf);
+          } catch (e) {
+            log(`APPEND FAILED at byte ${start}: ${e.name}`);
+            throw e;
+          }
+          await once(sb, 'updateend');
+
+          const t = audio.currentTime;
+          if (sb.buffered.length && sb.buffered.start(0) < t - 30) {
+            sb.remove(sb.buffered.start(0), t - 30);
+            await once(sb, 'updateend');
+          }
+        }
+        ms.endOfStream();
+        log(`buffered end: ${sb.buffered.end(sb.buffered.length - 1)}`);
+        await audio.play();
+        return;
+      }
+
       sb.mode = strategy === 'sequence' ? 'sequence' : 'segments';
 
       // An append that fails leaves an unchanged buffered range and nothing
@@ -192,6 +245,34 @@
       sb.addEventListener('error', () => log('  SOURCEBUFFER ERROR'));
 
       for (let i = 0; i < files.length; i++) {
+        if (strategy === 'range-join') {
+          // Same placement as 'exact' — no append window, no priming
+          // compensation, segments placed at their true boundaries. The only
+          // difference: each file arrives as two Range requests instead of
+          // one whole-file fetch, proving the join survives that change.
+          const offset = i * fixtures.trueDurationPerHalf;
+          sb.appendWindowStart = 0;
+          sb.appendWindowEnd = Infinity;
+          sb.timestampOffset = offset;
+          log(`append ${files[i]} offset=${offset.toFixed(6)} (range-join)`);
+
+          const head = await fetch(`./fixtures/${files[i]}`, { method: 'HEAD' });
+          const total = Number(head.headers.get('content-length'));
+          const mid = Math.floor(total / 2);
+          const parts = [[0, mid - 1], [mid, total - 1]];
+          for (const [start, end] of parts) {
+            const res = await fetch(`./fixtures/${files[i]}`, {
+              headers: { Range: `bytes=${start}-${end}` },
+            });
+            if (res.status !== 206) throw new Error(`expected 206, got ${res.status}`);
+            const buf = await res.arrayBuffer();
+            sb.appendBuffer(buf);
+            await once(sb, 'updateend');
+          }
+          log(`  buffered: ${ranges(sb.buffered)}`);
+          continue;
+        }
+
         const buf = await fetch(`./fixtures/${files[i]}`).then(r => r.arrayBuffer());
         if (trim) {
           const plan = computeAppendPlan({

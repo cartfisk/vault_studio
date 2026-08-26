@@ -31,5 +31,27 @@ done
 ffmpeg -v error -f lavfi -i "anoisesrc=r=44100:d=240:c=pink" -ac 2 \
   -c:a alac -movflags "$frag" -f mp4 "$out/big-alac.mp4"
 
+# The container duration overshoots the true content: AAC by its priming and
+# padding, ALAC by padding its last frame out to 4096 samples. The harness
+# needs the true count to trim against, and it is not in the file.
+{
+  echo '{'
+  echo '  "sampleRate": 44100,'
+  echo '  "trueSamplesPerHalf": 441000,'
+  echo '  "trueDurationPerHalf": 10.0,'
+  echo '  "encoded": {'
+  first=1
+  for f in h1-aac h2-aac h1-alac h2-alac; do
+    dur=$(ffprobe -v error -show_entries stream=duration \
+      -of default=nw=1:nk=1 "$out/$f.mp4")
+    [ $first -eq 0 ] && echo ','
+    first=0
+    printf '    "%s.mp4": { "containerDuration": %s }' "$f" "$dur"
+  done
+  echo
+  echo '  }'
+  echo '}'
+} > "$out/fixtures.json"
+
 rm -f "$out"/*.wav
 ls -l "$out"

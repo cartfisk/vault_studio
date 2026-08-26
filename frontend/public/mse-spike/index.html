@@ -29,6 +29,7 @@
     <button data-mode="aac-headtrim">AAC, head trim</button>
     <button data-mode="aac-elst">AAC, overlap + edit list</button>
     <button data-mode="alac-exact">ALAC, exact (no trim)</button>
+    <button data-mode="aac-exact">AAC, exact (no trim)</button>
   </p>
   <h2>Log</h2>
   <pre id="log"></pre>
@@ -93,6 +94,7 @@
       'aac-headtrim':  { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], strategy: 'headtrim' },
       'aac-elst':      { type: AAC, files: ['h1-aac-elst.mp4', 'h2-aac-elst.mp4'], strategy: 'overlap' },
       'alac-exact':    { type: ALAC, files: ['h1-alac.mp4', 'h2-alac.mp4'], strategy: 'exact' },
+      'aac-exact':     { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], strategy: 'exact' },
     };
 
     function primingSeconds(file) {

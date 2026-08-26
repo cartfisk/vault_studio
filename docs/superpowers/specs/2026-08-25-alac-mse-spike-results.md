@@ -1,9 +1,33 @@
-# ALAC / AAC in MSE — Spike Results
+# ALAC / AAC in MSE — Experiment Results
 
 Date: 2026-08-25
 Device: iPhone, iOS 18.7, Safari 26.6 (`Version/26.6 Mobile/15E148`)
 Served over: plain HTTP on the LAN. No secure-context problem surfaced.
 Control: desktop Chrome 151, same harness.
+
+Two rounds were run. Round one used a defective fixture; its conclusions are
+superseded and are recorded here only where they still hold.
+
+## The fixture defect
+
+Round one split the 20s source with `ffmpeg -t 10 -c copy`. WAV stream copy cuts
+at packet boundaries of 4096 samples, not at the requested sample, so the first
+half came out 442368 samples instead of 441000 and **overlapped the second half
+by 1368 samples — 31ms of duplicated audio**. No join could have been clean.
+
+Re-encoding the cut with `-c:a pcm_s16le` produces exactly 441000 samples per
+half. Every number below is from the corrected fixture unless stated.
+
+Two round-one findings were artifacts of this defect and are **withdrawn**:
+
+- *"ALAC pads its final frame to a 4096-sample boundary."* False. That was the
+  corrupt half (442368 = 108 x 4096). With a correct input ALAC reports exactly
+  10.000000 and overshoots by zero samples.
+- *"Container durations are inconsistent across identical content."* False. Both
+  halves now report identical durations. The inconsistency was the defect.
+
+One round-one finding survives: **Safari's `appendWindowEnd` clips to the last
+complete frame**, discarding real audio when the requested cut falls mid-frame.
 
 ## Capability probe
 
@@ -14,143 +38,108 @@ Control: desktop Chrome 151, same harness.
 | AAC supported | true | true |
 | ALAC supported | **true** | false |
 
-iOS exposes `ManagedMediaSource` only — plain `MediaSource` is absent, so the
-`ManagedMediaSource ?? MediaSource` selection and the `srcObject` attachment
-path are both load-bearing rather than defensive.
+iOS exposes `ManagedMediaSource` only. The `ManagedMediaSource ?? MediaSource`
+selection and the `srcObject` attachment path are both required, not defensive.
 
-## Joins
+## Encoder overshoot, corrected fixture
 
-True content is 10.000000s per half (441000 samples @ 44.1kHz), 20.0 joined.
+True content is 441000 samples (10.000000s) per half.
 
-| Mode | Range count | Final buffered end | Join audible? |
-|---|---|---|---|
-| AAC, untrimmed | 1 | 20.0775 | **click** |
-| AAC, trimmed | 1 | 19.9846 | **click** |
-| ALAC, trimmed | 1 | 20.0000 | **click** |
-| ALAC, 4min (39MB) | — | — | `ERROR: The quota has been exceeded.` |
-
-Per-append detail for the trimmed runs:
-
-| Mode | After append 1 | After append 2 |
+| File | Container duration | Overshoot |
 |---|---|---|
-| AAC, trimmed | 9.9846 | 19.9846 |
-| ALAC, trimmed | 9.9381 | 20.0000 |
+| h1-aac / h2-aac | 10.023220 | 1024 samples (priming) |
+| h1-alac / h2-alac | 10.000000 | **0 samples** |
+
+ALAC carries no priming and reports its true length. AAC carries exactly one
+frame of priming, consistently across both halves.
+
+## Results
+
+Device verdicts are from listening on the iPhone. A 440Hz tone split mid-cycle
+makes any discontinuity audible as a click.
+
+| Mode | Strategy | Buffered end (Chrome) | Device verdict |
+|---|---|---|---|
+| AAC, untrimmed | none | 20.0775 | click |
+| AAC, trimmed | appendWindow both ends | 19.9846 | click |
+| AAC, overlap | shift by priming, no clip | 20.0000 | click (minimal) |
+| AAC, overlap + edit list | as above, no `+empty_moov` | `(none)` | error |
+| AAC, head trim | clip head at frame boundary | 20.0000 | *pending* |
+| ALAC, trimmed | appendWindow both ends | — | **no click** |
+| ALAC, exact | placement only, no clip | — | **no click** |
+| ALAC, 4min (39MB) | whole-file append | — | `quota exceeded` |
 
 ## Answers
 
 ### 1. Does ManagedMediaSource accept ALAC? — YES
 
-`isTypeSupported('audio/mp4; codecs="alac"')` returns true on iOS Safari 26.6.
-The lossless half of the two-tier design is not blocked at the codec level.
+The lossless tier is not blocked at the codec level.
 
-Chrome returns false, which is expected for an Apple codec and irrelevant to
-the decision.
+### 2. Is a sample-accurate join achievable on iOS? — YES for ALAC
 
-### 2. Do two appends join into one buffered range? — YES, but see 3
+Both ALAC strategies are audibly clean, including the one that does no trimming
+whatsoever. The reason is structural: ALAC overshoots by zero samples, so no
+append window ever has to cut anything, and Safari's frame-granular clipping
+never engages. Placement alone is sufficient.
 
-Every mode reported `range count: 1`. Both halves land on one continuous
-presentation timeline.
+This is the strongest result of the experiment. **The lossless tier can be
+truly gapless with no trim arithmetic anywhere in the client.**
 
-This metric turned out to be worthless as a quality signal. Trimmed and
-untrimmed both report a single range; so does a join with 77.5ms of garbage in
-it. Range count says the timeline is contiguous, not that the audio is correct.
+### 3. Is a sample-accurate join achievable for AAC? — NOT YET
 
-### 3. Does the untrimmed join click? — YES. So does the TRIMMED join.
+Every AAC strategy tested so far clicks:
 
-This is the spike's central result and it contradicts the design's premise.
+- **Untrimmed** inserts the 1024-sample priming as audible content.
+- **Windowed** asks Safari to cut at sample 441000, which is mid-frame; Safari
+  clips to the last complete frame (430 x 1024 = 440320) and discards 680
+  samples of real audio.
+- **Overlap** shifts the next segment back by its full 1024-sample priming, but
+  the previous segment's tail padding is only 344 samples. The incoming
+  priming therefore overwrites 680 samples of real audio with silence — a
+  smaller defect, heard as a minimal click.
+- **Edit list** could not be tested: a fragmented MP4 built without
+  `+empty_moov` yields `buffered: (none)` with no error. It is not a valid MSE
+  byte stream. Reaching edit lists would require real CMAF/DASH muxing.
 
-Untrimmed clicks for the expected reason: the container overshoots the true
-content, so 77.5ms of encoder priming and padding is inserted between the
-halves (buffered end 20.0775 against a true 20.0).
-
-Trimmed also clicks, for the opposite reason — `appendWindowEnd` on Safari
-clips to the last COMPLETE frame rather than to the requested sample:
-
-| | Requested | Delivered | Frame maths | Real audio lost |
-|---|---|---|---|---|
-| AAC | 10.000000 (441000) | 9.9846 (440320) | 430 x 1024 exactly | 680 samples, 15.4ms |
-| ALAC | 10.000000 (441000) | 9.9381 (438272) | 107 x 4096 exactly | 2728 samples, 61.9ms |
-
-Both land on an exact whole-frame count. Desktop Chrome delivered 10.0000 for
-the same input and the same window, so this is Safari-specific behaviour, not
-an error in the arithmetic.
-
-ALAC is what makes this conclusive. It is lossless, so a correct join would be
-bit-exact and silent. It clicked. Audio is genuinely missing, not merely
-re-encoded.
-
-**`appendWindow` clipping cannot produce a sample-accurate join on iOS.** The
-mechanism the trim design rests on does not work on the target platform.
-
-One unexplained observation: ALAC's second append reported a final buffered end
-of exactly 20.0000, where frame-boundary truncation predicts 19.9381. Whether
-`buffered` coalesces across the append or the second append genuinely filled to
-the boundary is not established. It does not change the conclusion — the join
-was audibly broken either way.
+**Head trim** is the outstanding candidate: clip the priming off the head rather
+than the tail. Priming is exactly one AAC frame, so that cut is frame-aligned
+and does not require Safari to cut mid-frame. Result pending.
 
 ### 4. Does a full-length ALAC append survive? — NO
 
-A 39MB, 4-minute ALAC file fails outright:
-`ERROR: The quota has been exceeded.`
+A 39MB, 4-minute ALAC file fails with `The quota has been exceeded.` Whole-file
+append is not viable for the lossless tier.
 
-Whole-file append is not viable for the lossless tier on iOS.
-
-Not tested: a full-length AAC append (~8MB for 4 minutes at 256k). The decision
-below made the test moot, but the AAC quota ceiling remains unmeasured.
+A full-length AAC append (~8MB for 4 minutes at 256k) was not tested; the
+decision below made it moot.
 
 ## Consequences for the implementation spec
 
-Two of the spike design's exit branches fired at once, and they are independent
-problems with independent fixes.
+**Approach A is dropped for both tiers.** Decided after the quota failure.
+Rather than measure AAC's ceiling separately and maintain two delivery
+mechanisms, both tiers move to pre-segmented delivery (approach B: `init.mp4`
+plus numbered media segments and a manifest). This pulls a manifest format,
+many more files per version, and per-segment signed-URL auth into the main
+implementation spec.
 
-**Approach A is dead — both tiers.** Decided after this run. The quota failure
-kills whole-file append for ALAC outright, and rather than measure AAC's
-ceiling separately and maintain two delivery mechanisms, both tiers move to
-pre-segmented delivery (approach B: `init.mp4` plus numbered media segments and
-a manifest). This promotes B from a follow-on to a prerequisite and pulls its
-costs — a manifest format, many more files per version, per-segment signed-URL
-auth — into the main implementation spec.
+Note that this decision is about **delivery**, and delivery was never the cause
+of the clicks. Segmenting alone would not have produced a gapless player.
 
-**The seam is still unsolved, and B does not solve it.** Segmenting changes how
-bytes are delivered. It does nothing about frame-granular clipping, which is
-what makes the joins click. An implementation spec written on the assumption
-that `appendWindow` trims accurately would produce a clicking player no matter
-how the segments arrive.
+**The lossless tier is solved.** ALAC joins cleanly with placement alone.
 
-Two untried mechanisms remain, both cheap to test with this same harness:
-
-1. **Overlap-append.** Rather than clipping track N's tail, append track N+1
-   with a `timestampOffset` that places its priming samples over track N's
-   padding, and let MSE's overlap semantics discard the duplicates. This never
-   asks the browser to cut mid-frame, and it is how production MSE players
-   handle encoder delay.
-2. **Proper CMAF/DASH segmentation.** `+empty_moov` strips the edit list, which
-   is why the true sample counts had to be carried out-of-band in
-   `fixtures.json` at all. Segmenting with CMAF-aware tooling preserves edit
-   lists and correct `baseMediaDecodeTime`, which Safari may honour for priming
-   even where `appendWindow` does not.
-
-Neither has been tested. Until one of them produces a silent join on a device,
-true sample-accurate gapless is unproven on iOS and the implementation spec
-should not assume it.
+**The lossy tier is not, pending the head-trim result.** If head trim is clean,
+the client needs the priming sample count per file and nothing else. If it
+clicks, the remaining options are real CMAF muxing with preserved edit lists,
+or accepting a residual seam on the AAC tier only.
 
 **Carried forward regardless of mechanism:**
 
-- Container duration is not a usable source of true content length. Two files
-  holding identical 441000-sample content produced container durations of
-  10.031020 and 10.000000 (ALAC), 10.054240 and 10.023220 (AAC). The backend
-  must record true sample counts at transcode time.
+- The backend must record the true sample count and the encoder priming per
+  file. ALAC's priming is zero; AAC's was a consistent 1024 here but must be
+  measured rather than assumed, since it is encoder- and version-dependent.
 - `ManagedMediaSource` with `srcObject` and `disableRemotePlayback = true` is
-  the only attachment path on iOS. Plain `MediaSource` does not exist there.
-- Trim offsets cannot be `trueDuration * index`. With variable track durations
-  the timeline position is a running sum of true durations.
-
-## Recommendation
-
-Do not write the implementation spec yet. Run a second spike round against the
-two untried trim mechanisms first. The delivery decision (approach B) is
-settled and is not what is blocking; the seam is, and it is the entire point of
-the project.
-
-Keep the harness rather than deleting it — round two is a modification of it,
-not a rewrite.
+  the only attachment path on iOS.
+- Timeline offsets cannot be `trueDuration * index`. With variable track
+  durations the offset is a running sum of true durations.
+- Fixture and transcode pipelines must never cut audio with `-c copy`. It cuts
+  at packet boundaries and silently corrupts sample-exact work.

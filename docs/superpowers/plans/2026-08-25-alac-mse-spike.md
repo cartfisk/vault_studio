@@ -579,9 +579,13 @@ Append this to the end of the same `<script type="module">`, after the
             trueDuration: fixtures.trueDurationPerHalf,
             index: i,
           });
-          sb.timestampOffset = plan.timestampOffset;
-          sb.appendWindowStart = plan.appendWindowStart;
+          // Order matters: appendWindowStart must be strictly less than the
+          // current appendWindowEnd. Moving the window forward without
+          // widening it first throws — on append 1 the end is still the
+          // previous append's, so setting start to that value is out of range.
           sb.appendWindowEnd = plan.appendWindowEnd;
+          sb.appendWindowStart = plan.appendWindowStart;
+          sb.timestampOffset = plan.timestampOffset;
           log(`append ${files[i]} offset=${plan.timestampOffset} ` +
               `window=[${plan.appendWindowStart}, ${plan.appendWindowEnd}]`);
         } else {

@@ -2,7 +2,7 @@
 // (fragmented ALAC and FLAC, with recorded fragment byte ranges) for track
 // versions that predate the gapless playback feature. It also doubles as
 // the repair tool for a version whose set previously failed: rerunning it
-// picks up any version without a completed ALAC set.
+// picks up any version missing a completed set for any codec.
 package main
 
 import (
@@ -71,9 +71,9 @@ type backfillSummary struct {
 	Failed               int
 }
 
-// runBackfill processes every lossless version missing a completed ALAC
-// set. It is the whole command's logic, factored out of main so it can be
-// exercised directly by tests against a throwaway database.
+// runBackfill processes every lossless version missing a completed segment
+// set for some codec. It is the whole command's logic, factored out of main
+// so it can be exercised directly by tests against a throwaway database.
 func runBackfill(ctx context.Context, database *db.DB, dryRun, verbose bool) (backfillSummary, error) {
 	var summary backfillSummary
 
@@ -136,43 +136,38 @@ func runBackfill(ctx context.Context, database *db.DB, dryRun, verbose bool) (ba
 	return summary, nil
 }
 
-// backfillVersion creates a pending segment-set row per codec, builds both
-// codecs, and persists the results. On any failure it marks every set for
-// this version failed rather than leaving a stale pending row behind, so a
-// later run picks the version back up.
+// backfillVersion builds both codecs first and only touches the database
+// once the build has succeeded. A version reaches here precisely because
+// some codec's set is missing or failed while another may already be
+// completed and serving; creating rows before building would reset that
+// completed row to pending, and BuildAllSegmentSets's atomic-rename
+// wouldn't save it if the other codec then failed persistently, since a
+// rebuilt copy would still land on top of it. Building first means a
+// build failure never touches an existing row at all, and the query picks
+// the version back up on the next run, which is correct for a repair tool.
 func backfillVersion(ctx context.Context, database *db.DB, versionID int64, sourcePath, sourceCodec string) error {
 	versionDir := filepath.Dir(sourcePath)
 
-	setIDs := make(map[string]int64, len(transcoding.SegmentCodecs))
-	for _, codec := range transcoding.SegmentCodecs {
-		outPath := filepath.Join(versionDir, "gapless-"+codec+".mp4")
-		row, err := database.CreateSegmentSet(ctx, sqlc.CreateSegmentSetParams{
-			VersionID: versionID,
-			Codec:     codec,
-			FilePath:  outPath,
-		})
-		if err != nil {
-			return fmt.Errorf("create %s segment set: %w", codec, err)
-		}
-		setIDs[codec] = row.ID
-	}
-
 	sets, err := transcoding.BuildAllSegmentSets(sourcePath, versionDir, sourceCodec)
 	if err != nil {
-		failAllSegmentSets(ctx, database, setIDs)
 		return fmt.Errorf("build segment sets: %w", err)
 	}
 
 	var persistErrs []error
 	for _, set := range sets {
-		id, ok := setIDs[set.Codec]
-		if !ok {
+		row, err := database.CreateSegmentSet(ctx, sqlc.CreateSegmentSetParams{
+			VersionID: versionID,
+			Codec:     set.Codec,
+			FilePath:  set.FilePath,
+		})
+		if err != nil {
+			persistErrs = append(persistErrs, fmt.Errorf("create %s segment set: %w", set.Codec, err))
 			continue
 		}
-		if err := transcoding.PersistSegmentSet(database, id, set); err != nil {
+		if err := transcoding.PersistSegmentSet(database, row.ID, set); err != nil {
 			persistErrs = append(persistErrs, fmt.Errorf("persist %s: %w", set.Codec, err))
-			if ferr := database.FailSegmentSet(ctx, id); ferr != nil {
-				log.Printf("    failed to mark segment set %d failed: %v", id, ferr)
+			if ferr := database.FailSegmentSet(ctx, row.ID); ferr != nil {
+				log.Printf("    failed to mark segment set %d failed: %v", row.ID, ferr)
 			}
 		}
 	}
@@ -181,15 +176,4 @@ func backfillVersion(ctx context.Context, database *db.DB, versionID int64, sour
 	}
 
 	return nil
-}
-
-// failAllSegmentSets marks every set in setIDs failed. Used when a shared
-// build step (BuildAllSegmentSets) fails, since neither codec's set has
-// output to persist.
-func failAllSegmentSets(ctx context.Context, database *db.DB, setIDs map[string]int64) {
-	for _, id := range setIDs {
-		if err := database.FailSegmentSet(ctx, id); err != nil {
-			log.Printf("    failed to mark segment set %d failed: %v", id, err)
-		}
-	}
 }

@@ -150,23 +150,44 @@ func BuildSegmentSet(sourcePath, outputPath, targetCodec, sourceCodec string) (s
 // The cross-check is why both codecs are built together. A disagreement means
 // one encode dropped or padded audio, and placing tracks at running offsets of
 // a wrong length is exactly the failure this feature exists to avoid.
+//
+// Every codec is built into a unique staging file in versionDir, never at
+// its final gapless-<codec>.mp4 path. Nothing touches a final path until
+// every codec has built AND the cross-check above has passed. That is the
+// property that makes the whole set atomic on disk: a persistently-failing
+// FLAC build must not disturb an already-completed ALAC file (or vice
+// versa) by renaming a rebuilt-but-doomed file over it.
 func BuildAllSegmentSets(sourcePath, versionDir, sourceCodec string) (sets []*SegmentSet, err error) {
+	stagingPaths := make([]string, 0, len(SegmentCodecs))
 	built := make([]*SegmentSet, 0, len(SegmentCodecs))
 
 	// If any codec fails, or the cross-check below disagrees, remove every
-	// file successfully built so far rather than leave a partial set (e.g.
-	// a valid gapless-alac.mp4 with no matching FLAC) on disk.
+	// staging file created so far. Final paths are never touched before
+	// this point, so there is nothing to restore there.
 	defer func() {
 		if err != nil {
-			for _, s := range built {
-				os.Remove(s.FilePath)
+			for _, p := range stagingPaths {
+				os.Remove(p)
 			}
 		}
 	}()
 
 	for _, codec := range SegmentCodecs {
-		out := filepath.Join(versionDir, "gapless-"+codec+".mp4")
-		set, buildErr := BuildSegmentSet(sourcePath, out, codec, sourceCodec)
+		// os.CreateTemp both allocates a unique name and creates the file,
+		// so two concurrent builders (or a concurrent backfill run) can
+		// never collide on the same staging path. BuildSegmentSet writes
+		// through its own outputPath+".tmp" and renames onto outputPath
+		// only once ffmpeg has produced a valid, fragmented file -- that
+		// rename overwrites this placeholder.
+		stagingFile, cerr := os.CreateTemp(versionDir, "gapless-"+codec+"-*.mp4")
+		if cerr != nil {
+			return nil, fmt.Errorf("create staging file for %s: %w", codec, cerr)
+		}
+		stagingPath := stagingFile.Name()
+		stagingFile.Close()
+		stagingPaths = append(stagingPaths, stagingPath)
+
+		set, buildErr := BuildSegmentSet(sourcePath, stagingPath, codec, sourceCodec)
 		if buildErr != nil {
 			return nil, buildErr
 		}
@@ -182,7 +203,76 @@ func BuildAllSegmentSets(sourcePath, versionDir, sourceCodec string) (sets []*Se
 		}
 	}
 
+	// Every codec built and the cross-check passed: commit each staged
+	// file onto its final path and repoint FilePath there. FilePath is
+	// what gets written to the database and later served, so a set left
+	// pointing at its staging path would look complete while actually
+	// pointing nowhere useful.
+	//
+	// Every destination is checked first: a cross-file atomic rename does
+	// not exist on POSIX, so the next best thing is to refuse before the
+	// first rename rather than discover the problem halfway through and
+	// leave a half-committed set (e.g. a freshly-renamed ALAC file next to
+	// a FLAC set that never landed).
+	finalPaths := make([]string, len(built))
+	for i, set := range built {
+		finalPaths[i] = filepath.Join(versionDir, "gapless-"+set.Codec+".mp4")
+	}
+	if perr := preflightCommitDestinations(finalPaths); perr != nil {
+		err = fmt.Errorf("preflight commit destinations: %w", perr)
+		return nil, err
+	}
+
+	for i, set := range built {
+		// Preflight already confirmed this destination is renameable, so a
+		// failure here is a genuine race (something changed the
+		// destination in the microseconds since preflight ran) or an
+		// underlying filesystem error, not the predictable case preflight
+		// exists to catch. Deliberately not unwinding it: doing so would
+		// mean saving the bytes a rename is about to overwrite before
+		// performing it, which is materially more machinery than this
+		// earns. The resulting state -- some codecs committed, one
+		// rename failed -- is a partial commit, but it is no worse than
+		// the partial state this whole file already tolerated before the
+		// atomic-commit change existed. The caller marks the set failed
+		// and a rerun repairs it, same as any other build failure.
+		if rerr := os.Rename(set.FilePath, finalPaths[i]); rerr != nil {
+			err = fmt.Errorf("commit %s into place: %w", set.Codec, rerr)
+			return nil, err
+		}
+		set.FilePath = finalPaths[i]
+	}
+
 	return built, nil
+}
+
+// preflightCommitDestinations checks every path in finalPaths for the
+// conditions that would make os.Rename onto it fail predictably: the
+// destination already existing as a directory, or its parent directory
+// refusing new files. It creates and immediately removes a throwaway probe
+// file in each destination's parent directory, which is the only reliable,
+// portable way to answer "can I write here" -- permission bits alone don't
+// account for ACLs, quotas, or read-only mounts. Returns the first problem
+// found without touching any of the actual destinations.
+func preflightCommitDestinations(finalPaths []string) error {
+	for _, finalPath := range finalPaths {
+		if info, err := os.Lstat(finalPath); err == nil {
+			if info.IsDir() {
+				return fmt.Errorf("destination %s exists and is a directory", finalPath)
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("stat destination %s: %w", finalPath, err)
+		}
+
+		probe, perr := os.CreateTemp(filepath.Dir(finalPath), ".gapless-preflight-*")
+		if perr != nil {
+			return fmt.Errorf("destination directory for %s is not writable: %w", finalPath, perr)
+		}
+		probePath := probe.Name()
+		probe.Close()
+		os.Remove(probePath)
+	}
+	return nil
 }
 
 type segmentProbe struct {

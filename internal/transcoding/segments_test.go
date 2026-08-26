@@ -240,6 +240,67 @@ func TestBuildAllSegmentSetsCleansUpPreviouslyBuiltFiles(t *testing.T) {
 	}
 }
 
+// TestBuildAllSegmentSetsPreflightsAllDestinationsBeforeCommitting proves
+// the commit step checks every codec's final destination before renaming
+// any of them, rather than discovering a blocked destination partway
+// through the commit loop and leaving a partial commit behind. It reuses
+// the same forced FLAC failure as
+// TestBuildAllSegmentSetsCleansUpPreviouslyBuiltFiles (a pre-created
+// directory at gapless-flac.mp4), but asserts on the commit step
+// specifically: since ALAC's build succeeds first, an implementation that
+// renames as it goes (rather than checking every destination up front)
+// would commit gapless-alac.mp4 before ever attempting FLAC's blocked
+// rename. Preflighting both destinations first must catch the problem
+// before that ALAC rename ever runs.
+func TestBuildAllSegmentSetsPreflightsAllDestinationsBeforeCommitting(t *testing.T) {
+	dir := t.TempDir()
+	src := makeSourceWAV(t, dir, 12)
+
+	flacOut := filepath.Join(dir, "gapless-flac.mp4")
+	if err := os.Mkdir(flacOut, 0755); err != nil {
+		t.Fatalf("pre-create flac output path as a directory: %v", err)
+	}
+	alacOut := filepath.Join(dir, "gapless-alac.mp4")
+
+	if _, err := BuildAllSegmentSets(src, dir, "pcm_s16le"); err == nil {
+		t.Fatal("BuildAllSegmentSets() error = nil, want error from the blocked flac destination")
+	}
+
+	if _, statErr := os.Stat(alacOut); !os.IsNotExist(statErr) {
+		t.Errorf("alac final file committed at %s despite the blocked flac destination: stat err = %v", alacOut, statErr)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read version dir: %v", err)
+	}
+	for _, e := range entries {
+		switch e.Name() {
+		case "source.wav", "gapless-flac.mp4":
+			continue // pre-existing fixtures, not this call's output
+		}
+		t.Errorf("unexpected leftover entry %q in version dir after preflight failure", e.Name())
+	}
+}
+
+// TestSegmentCodecsCountMatchesSQLLiteral is the cheapest real link between
+// SegmentCodecs and the hardcoded 2 in
+// internal/db/queries/segments.sql's ListLosslessVersionsMissingSegments.
+// That query treats a version as "done" once its count of completed sets
+// reaches 2; if SegmentCodecs ever changes length without updating the SQL,
+// a version with N-1 of N codecs completed would read as done and silently
+// stop being returned for repair.
+func TestSegmentCodecsCountMatchesSQLLiteral(t *testing.T) {
+	if len(SegmentCodecs) != 2 {
+		t.Fatalf(
+			"len(SegmentCodecs) = %d, want 2 -- update the hardcoded 2 in "+
+				"internal/db/queries/segments.sql's ListLosslessVersionsMissingSegments "+
+				"(and regenerate sqlc) to match, then update this test",
+			len(SegmentCodecs),
+		)
+	}
+}
+
 func TestSampleCountFor(t *testing.T) {
 	tests := []struct {
 		name                       string

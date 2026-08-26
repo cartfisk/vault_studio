@@ -39,7 +39,10 @@ func NewStreamingHandler(database *db.DB) *StreamingHandler {
 // version, so the track's own active_version_id is used. That's safe by
 // construction: it was never taken from request input, so there's nothing
 // to cross-check.
-func (h *StreamingHandler) resolveVersionForTrack(ctx context.Context, track sqlc.Track, requestedVersionID *int64) (int64, error) {
+//
+// This is a package-level function (not a method) so both StreamingHandler
+// and MediaHandler can call the same check without duplicating it.
+func resolveVersionForTrack(ctx context.Context, database *db.DB, track sqlc.Track, requestedVersionID *int64) (int64, error) {
 	if requestedVersionID == nil {
 		if !track.ActiveVersionID.Valid {
 			return 0, apperr.NewBadRequest("track has no active version")
@@ -47,7 +50,7 @@ func (h *StreamingHandler) resolveVersionForTrack(ctx context.Context, track sql
 		return track.ActiveVersionID.Int64, nil
 	}
 
-	version, err := h.db.Queries.GetTrackVersion(ctx, *requestedVersionID)
+	version, err := database.Queries.GetTrackVersion(ctx, *requestedVersionID)
 	if err := httputil.HandleDBError(err, "version not found", "failed to query version"); err != nil {
 		return 0, err
 	}
@@ -104,12 +107,12 @@ func (h *StreamingHandler) StreamTrack(w http.ResponseWriter, r *http.Request) e
 		return apperr.NewForbidden("access revoked")
 	}
 
-	finalVersionID, err := h.resolveVersionForTrack(ctx, track, versionID)
+	finalVersionID, err := resolveVersionForTrack(ctx, h.db, track, versionID)
 	if err != nil {
 		return err
 	}
 
-	quality := h.resolveQuality(ctx, int64(userID), track.ID, requestedQuality)
+	quality := resolveQuality(ctx, h.db, int64(userID), track.ID, requestedQuality)
 
 	file, err := h.findTrackFile(ctx, finalVersionID, quality)
 	if err != nil {
@@ -120,7 +123,14 @@ func (h *StreamingHandler) StreamTrack(w http.ResponseWriter, r *http.Request) e
 	return nil
 }
 
-func (h *StreamingHandler) resolveQuality(ctx context.Context, userID, trackID int64, requestedQuality string) string {
+// resolveQuality applies the quality precedence used across streaming
+// routes: an explicit requested quality wins, then a project-level
+// override, then the user's own preference, falling back to "lossy".
+//
+// This is a package-level function (not a method) so both StreamingHandler
+// and MediaHandler resolve quality identically instead of maintaining two
+// copies of this precedence that could silently drift apart.
+func resolveQuality(ctx context.Context, database *db.DB, userID, trackID int64, requestedQuality string) string {
 	if requestedQuality != "" {
 		switch requestedQuality {
 		case "source", "lossless", "lossy":
@@ -128,15 +138,15 @@ func (h *StreamingHandler) resolveQuality(ctx context.Context, userID, trackID i
 		}
 	}
 
-	track, err := h.db.GetTrackByID(ctx, trackID)
+	track, err := database.GetTrackByID(ctx, trackID)
 	if err == nil {
-		project, err := h.db.GetProjectByID(ctx, track.ProjectID)
+		project, err := database.GetProjectByID(ctx, track.ProjectID)
 		if err == nil && project.QualityOverride.Valid {
 			return project.QualityOverride.String
 		}
 	}
 
-	prefs, err := h.db.GetUserPreferences(ctx, userID)
+	prefs, err := database.GetUserPreferences(ctx, userID)
 	if err == nil {
 		return prefs.DefaultQuality
 	}

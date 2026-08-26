@@ -55,7 +55,7 @@ func (h *StreamingHandler) StreamGapless(w http.ResponseWriter, r *http.Request)
 		requestedVersionID = &parsed
 	}
 
-	versionID, err := h.resolveVersionForTrack(ctx, track, requestedVersionID)
+	versionID, err := resolveVersionForTrack(ctx, h.db, track, requestedVersionID)
 	if err != nil {
 		return err
 	}

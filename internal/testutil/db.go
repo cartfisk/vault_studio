@@ -200,3 +200,18 @@ func SeedCompletedSegmentSet(t *testing.T, database *db.DB, versionID int64, cod
 
 	return setID
 }
+
+// SetUserQuality upserts userID's default_quality preference, so
+// resolveQuality's user-preference fallback resolves to quality instead of
+// the hardcoded "lossy" default used when no preferences row exists.
+func SetUserQuality(t *testing.T, database *db.DB, userID int64, quality string) {
+	t.Helper()
+
+	if _, err := database.Exec(
+		`INSERT INTO user_preferences (user_id, default_quality) VALUES (?, ?)
+		ON CONFLICT(user_id) DO UPDATE SET default_quality = excluded.default_quality`,
+		userID, quality,
+	); err != nil {
+		t.Fatalf("set user quality error = %v", err)
+	}
+}

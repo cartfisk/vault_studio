@@ -58,16 +58,24 @@ frame of priming, consistently across both halves.
 Device verdicts are from listening on the iPhone. A 440Hz tone split mid-cycle
 makes any discontinuity audible as a click.
 
-| Mode | Strategy | Buffered end (Chrome) | Device verdict |
-|---|---|---|---|
-| AAC, untrimmed | none | 20.0775 | click |
-| AAC, trimmed | appendWindow both ends | 19.9846 | click |
-| AAC, overlap | shift by priming, no clip | 20.0000 | click (minimal) |
-| AAC, overlap + edit list | as above, no `+empty_moov` | `(none)` | error |
-| AAC, head trim | clip head at frame boundary | 20.0000 | *pending* |
-| ALAC, trimmed | appendWindow both ends | — | **no click** |
-| ALAC, exact | placement only, no clip | — | **no click** |
-| ALAC, 4min (39MB) | whole-file append | — | `quota exceeded` |
+Final device verdicts, measured against 1s + 1s halves (the join arrives a
+second after pressing play, which makes A/B comparison practical).
+
+| Mode | Strategy | Device verdict |
+|---|---|---|
+| AAC, untrimmed | none | click |
+| AAC, exact | placement only, no clip | click |
+| AAC, trimmed | appendWindow both ends | click |
+| AAC, overlap | shift by priming, no clip | click (minimal) |
+| AAC, head trim | clip head at frame boundary | click (cleanest of the AAC set) |
+| AAC, overlap + edit list | no `+empty_moov` | error — not a valid MSE stream |
+| ALAC, trimmed | appendWindow both ends | **no click** |
+| ALAC, exact | placement only, no clip | **no click** |
+| ALAC, 4min (39MB) | whole-file append | `quota exceeded` |
+
+The comparison that isolates the cause is `ALAC, exact` against `AAC, exact`:
+identical strategy, identical placement, and the only difference is that AAC
+carries priming and ALAC does not. ALAC is silent; AAC clicks.
 
 ## Answers
 
@@ -85,25 +93,39 @@ never engages. Placement alone is sufficient.
 This is the strongest result of the experiment. **The lossless tier can be
 truly gapless with no trim arithmetic anywhere in the client.**
 
-### 3. Is a sample-accurate join achievable for AAC? — NOT YET
+### 3. Is a sample-accurate join achievable for AAC? — NOT BY CLIENT-SIDE TRIMMING
 
-Every AAC strategy tested so far clicks:
+Every AAC strategy clicks:
 
-- **Untrimmed** inserts the 1024-sample priming as audible content.
-- **Windowed** asks Safari to cut at sample 441000, which is mid-frame; Safari
-  clips to the last complete frame (430 x 1024 = 440320) and discards 680
-  samples of real audio.
-- **Overlap** shifts the next segment back by its full 1024-sample priming, but
-  the previous segment's tail padding is only 344 samples. The incoming
-  priming therefore overwrites 680 samples of real audio with silence — a
-  smaller defect, heard as a minimal click.
-- **Edit list** could not be tested: a fragmented MP4 built without
-  `+empty_moov` yields `buffered: (none)` with no error. It is not a valid MSE
-  byte stream. Reaching edit lists would require real CMAF/DASH muxing.
+- **Untrimmed and exact** leave the 1024-sample priming in the stream, so each
+  segment's real audio starts ~23ms late and that silence lands in the join.
+- **Windowed** asks Safari to cut mid-frame; Safari clips to the last complete
+  frame instead and discards real audio.
+- **Overlap** shifts the next segment back by its full 1024-sample priming,
+  which overwrites real audio with the incoming segment's silence, because the
+  outgoing segment's tail padding is smaller than the shift.
+- **Head trim** removes the priming correctly — that cut lands on a frame
+  boundary, which Safari accepts — and is audibly the cleanest AAC result. It
+  still clicks, because it cannot remove the TAIL padding.
+- **Edit list** could not be tested at all: a fragmented MP4 built without
+  `+empty_moov` yields `buffered: (none)`. It is not a valid MSE byte stream.
 
-**Head trim** is the outstanding candidate: clip the priming off the head rather
-than the tail. Priming is exactly one AAC frame, so that cut is frame-aligned
-and does not require Safari to cut mid-frame. Result pending.
+The tail is the wall. AAC packs 44100 real samples plus 1024 priming into 45
+frames of 1024 = 46080 samples, leaving 956 samples of padding after the real
+audio. The next segment is placed on top of that padding, and MSE's overwrite is
+frame-granular in the same way clipping is, so it removes a whole frame of the
+outgoing segment along with the padding.
+
+This is the same frame-granularity limit seen at the head, relocated to the
+tail, and it is why gapless AAC in practice relies on the container's edit list
+rather than on client-side trimming. Our MSE segments strip that edit list,
+because `+empty_moov` is what makes them valid MSE segments in the first place.
+
+**The untested mechanism and the chosen delivery mechanism are the same work.**
+Approach B is CMAF segmentation, and CMAF tooling emits `init.mp4` plus `.m4s`
+media segments with edit lists preserved. Whether Safari honours those edit
+lists for priming is the one open question for the lossy tier, and building B
+answers it.
 
 ### 4. Does a full-length ALAC append survive? — NO
 
@@ -125,12 +147,26 @@ implementation spec.
 Note that this decision is about **delivery**, and delivery was never the cause
 of the clicks. Segmenting alone would not have produced a gapless player.
 
-**The lossless tier is solved.** ALAC joins cleanly with placement alone.
+**The lossless tier is solved.** ALAC joins cleanly with placement alone. No
+append windows, no priming compensation, no trim arithmetic in the client — the
+backend records true sample counts and the client places segments at running
+offsets.
 
-**The lossy tier is not, pending the head-trim result.** If head trim is clean,
-the client needs the priming sample count per file and nothing else. If it
-clicks, the remaining options are real CMAF muxing with preserved edit lists,
-or accepting a residual seam on the AAC tier only.
+**The lossy tier is unresolved and has three exits.** In preference order:
+
+1. **CMAF with preserved edit lists.** Costs nothing extra, because approach B
+   builds CMAF segments regardless. Prove it during B's implementation with the
+   harness still in the tree; if Safari honours the edit list, AAC is gapless
+   for free.
+2. **Ship gapless on lossless only.** ALAC works today. The lossy tier keeps
+   today's seam and the player degrades by quality preference rather than
+   failing. Costs nothing to build and is the natural fallback if (1) fails.
+3. **Serve ALAC to everyone.** Removes the problem by removing AAC, at roughly
+   5-10x the bandwidth per stream. Only worth considering if gapless matters
+   more than data usage, which for a mobile listener it likely does not.
+
+Do not build a client-side AAC trimming path. Four variants were tested and the
+frame-granularity limit defeats all of them; a fifth is unlikely to differ.
 
 **Carried forward regardless of mechanism:**
 

@@ -16,10 +16,18 @@
 <body>
   <h1>MSE codec spike</h1>
   <table id="support"></table>
+  <audio id="player" controls playsinline></audio>
+  <p>
+    <button data-mode="aac-untrimmed">AAC, untrimmed</button>
+    <button data-mode="aac-trimmed">AAC, trimmed</button>
+    <button data-mode="alac-trimmed">ALAC, trimmed</button>
+    <button data-mode="alac-big">ALAC, 4min (memory)</button>
+  </p>
   <h2>Log</h2>
   <pre id="log"></pre>
 
   <script type="module">
+    import { computeAppendPlan } from './trim.js';
     const AAC = 'audio/mp4; codecs="mp4a.40.2"';
     const ALAC = 'audio/mp4; codecs="alac"';
 
@@ -52,6 +60,84 @@
     window.spikeLog = log;
     window.spikeImpl = Impl;
     window.spikeTypes = { AAC, ALAC };
+
+    const audio = document.getElementById('player');
+    const fixtures = await fetch('./fixtures/fixtures.json').then(r => r.json());
+
+    const MODES = {
+      'aac-untrimmed': { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], trim: false },
+      'aac-trimmed':   { type: AAC, files: ['h1-aac.mp4', 'h2-aac.mp4'], trim: true },
+      'alac-trimmed':  { type: ALAC, files: ['h1-alac.mp4', 'h2-alac.mp4'], trim: true },
+      'alac-big':      { type: ALAC, files: ['big-alac.mp4'], trim: false },
+    };
+
+    function ranges(buffered) {
+      const out = [];
+      for (let i = 0; i < buffered.length; i++) {
+        out.push(`[${buffered.start(i).toFixed(4)}, ${buffered.end(i).toFixed(4)}]`);
+      }
+      return out.join(' ') || '(none)';
+    }
+
+    function once(target, event) {
+      return new Promise(resolve =>
+        target.addEventListener(event, resolve, { once: true }));
+    }
+
+    async function run(mode) {
+      const { type, files, trim } = MODES[mode];
+      log(`\n--- ${mode} ---`);
+
+      if (!Impl || !Impl.isTypeSupported(type)) {
+        log(`unsupported: ${type}`);
+        return;
+      }
+
+      const ms = new Impl();
+      // ManagedMediaSource attaches via srcObject and refuses to attach while
+      // remote playback is enabled. Plain MediaSource needs an object URL.
+      if (window.ManagedMediaSource && ms instanceof window.ManagedMediaSource) {
+        audio.disableRemotePlayback = true;
+        audio.srcObject = ms;
+      } else {
+        audio.src = URL.createObjectURL(ms);
+      }
+
+      await once(ms, 'sourceopen');
+      const sb = ms.addSourceBuffer(type);
+      sb.mode = trim ? 'segments' : 'sequence';
+
+      for (let i = 0; i < files.length; i++) {
+        const buf = await fetch(`./fixtures/${files[i]}`).then(r => r.arrayBuffer());
+        if (trim) {
+          const plan = computeAppendPlan({
+            trueDuration: fixtures.trueDurationPerHalf,
+            index: i,
+          });
+          sb.timestampOffset = plan.timestampOffset;
+          sb.appendWindowStart = plan.appendWindowStart;
+          sb.appendWindowEnd = plan.appendWindowEnd;
+          log(`append ${files[i]} offset=${plan.timestampOffset} ` +
+              `window=[${plan.appendWindowStart}, ${plan.appendWindowEnd}]`);
+        } else {
+          log(`append ${files[i]} (mode=sequence, no trim)`);
+        }
+        sb.appendBuffer(buf);
+        await once(sb, 'updateend');
+        log(`  buffered: ${ranges(sb.buffered)}`);
+      }
+
+      ms.endOfStream();
+      log(`final buffered: ${ranges(sb.buffered)}`);
+      log(`range count: ${sb.buffered.length} (1 = joined, 2 = seam)`);
+      await audio.play();
+    }
+
+    for (const button of document.querySelectorAll('button[data-mode]')) {
+      button.addEventListener('click', () => {
+        run(button.dataset.mode).catch(err => log('ERROR: ' + err.message));
+      });
+    }
   </script>
 </body>
 </html>

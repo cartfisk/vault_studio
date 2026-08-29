@@ -346,10 +346,17 @@ func TestBuildAllSegmentSetsSweepsStaleStagingFiles(t *testing.T) {
 }
 
 // TestSweepStaleStagingFilesNeverMatchesAFinalPath verifies, rather than
-// assumes, that the sweep's glob pattern cannot match a completed set's
-// final path: "gapless-alac.mp4" has no hyphen after the codec, while the
-// pattern requires one ("gapless-alac-*.mp4*"). A final file, even one
-// old enough that an age-only check would remove it, must survive.
+// assumes, that the production glob cannot match a completed set's final
+// path: "gapless-alac.mp4" has no hyphen after the codec, while
+// stagingGlobFor's pattern requires one ("gapless-alac-*.mp4*"). A final
+// file, even one old enough that an age-only check would remove it, must
+// survive.
+//
+// This calls stagingGlobFor(dir, "alac") itself rather than holding its
+// own copy of the "gapless-alac-*.mp4*" literal. A copy here would keep
+// passing even if stagingGlobFor's pattern were later widened to
+// something that matches a real completed set -- exactly the way this
+// test was hollow before stagingGlobFor existed.
 func TestSweepStaleStagingFilesNeverMatchesAFinalPath(t *testing.T) {
 	dir := t.TempDir()
 	finalPath := filepath.Join(dir, "gapless-alac.mp4")
@@ -361,7 +368,7 @@ func TestSweepStaleStagingFilesNeverMatchesAFinalPath(t *testing.T) {
 		t.Fatalf("Chtimes final file: %v", err)
 	}
 
-	if err := sweepStaleFiles(filepath.Join(dir, "gapless-alac-*.mp4*"), staleStagingAge); err != nil {
+	if err := sweepStaleFiles(stagingGlobFor(dir, "alac"), staleStagingAge); err != nil {
 		t.Fatalf("sweepStaleFiles() error = %v", err)
 	}
 

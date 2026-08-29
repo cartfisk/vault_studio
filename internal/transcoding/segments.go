@@ -203,7 +203,7 @@ func BuildAllSegmentSets(sourcePath, versionDir, sourceCodec string) (sets []*Se
 	}
 
 	for _, codec := range SegmentCodecs {
-		if serr := sweepStaleFiles(filepath.Join(versionDir, "gapless-"+codec+"-*.mp4*"), staleStagingAge); serr != nil {
+		if serr := sweepStaleFiles(stagingGlobFor(versionDir, codec), staleStagingAge); serr != nil {
 			return nil, fmt.Errorf("sweep stale %s staging files: %w", codec, serr)
 		}
 
@@ -312,6 +312,24 @@ func preflightCommitDestinations(finalPaths []string) error {
 		os.Remove(probePath)
 	}
 	return nil
+}
+
+// stagingGlobFor returns the glob pattern matching codec's staging files
+// in versionDir and nothing else -- in particular, never the final
+// gapless-<codec>.mp4 path. A final path has no hyphen after the codec
+// ("gapless-alac.mp4"), while every staging file os.CreateTemp creates
+// does ("gapless-alac-<random>.mp4"), and the trailing "*" after ".mp4"
+// also catches BuildSegmentSet's own "*.mp4.tmp" if a build was
+// interrupted mid-ffmpeg-run.
+//
+// This is the only place the pattern is written. sweepStaleFiles deletes
+// whatever it matches -- the most destructive operation in this file, run
+// unattended against a user's music library -- so a test asserting a
+// final file is safe from it must call this function, not hold its own
+// copy of the pattern: a copy would keep passing even if this pattern
+// were later widened to something that matches a real completed set.
+func stagingGlobFor(versionDir, codec string) string {
+	return filepath.Join(versionDir, "gapless-"+codec+"-*.mp4*")
 }
 
 // sweepStaleFiles removes every file matching pattern whose modification

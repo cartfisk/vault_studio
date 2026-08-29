@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func requireFFmpeg(t *testing.T) {
@@ -140,8 +141,9 @@ func TestBuildSegmentSetRejectsUnknownCodec(t *testing.T) {
 // case would require a post-write failure (probe, scan, or the
 // not-fragmented check), which could not be triggered deterministically
 // without either breaking fragMovFlags or contriving a broken encoder, both
-// off-limits. See TestBuildAllSegmentSetsCleansUpPreviouslyBuiltFiles below
-// for a genuine, non-vacuous exercise of the cleanup-on-failure behavior.
+// off-limits. See TestBuildAllSegmentSetsRemovesStagedFilesOnBuildFailure
+// below for a genuine, non-vacuous exercise of the cleanup-on-failure
+// behavior.
 func TestBuildSegmentSetLeavesNoFileOnFFmpegFailure(t *testing.T) {
 	requireFFmpeg(t)
 	dir := t.TempDir()
@@ -213,45 +215,68 @@ func TestBuildSegmentSetIsAtomicToConcurrentReaders(t *testing.T) {
 	}
 }
 
-// TestBuildAllSegmentSetsCleansUpPreviouslyBuiltFiles forces a genuine,
-// deterministic failure on the second codec (flac) without touching the
-// encoder: it pre-creates a directory at the flac output path, so ffmpeg
-// refuses to open it ("Is a directory") after alac has already been built
-// successfully. It then asserts BuildAllSegmentSets removed the alac file it
-// had already written, rather than leaving a plausible-looking gapless-alac.mp4
-// for a version whose flac set never materialized.
-func TestBuildAllSegmentSetsCleansUpPreviouslyBuiltFiles(t *testing.T) {
+// TestBuildAllSegmentSetsRemovesStagedFilesOnBuildFailure forces a
+// genuine ffmpeg BUILD-stage failure (not a preflight or commit-stage
+// one) by pointing sourcePath at a file ffmpeg cannot decode as audio, and
+// asserts the version directory ends up holding nothing but that source:
+// no staged file survives, and no final file for either codec appears.
+//
+// This test used to force its failure by pre-creating a directory at the
+// flac output path, back when BuildSegmentSet wrote straight to that
+// path. Since BuildAllSegmentSets started building into unique staging
+// files first, that trick no longer touches the build at all -- ffmpeg
+// never goes near the blocked path -- it only trips
+// preflightCommitDestinations, which
+// TestBuildAllSegmentSetsPreflightsAllDestinationsBeforeCommitting below
+// already covers. Repurposed here to cover the build-stage path instead,
+// which is the central new mechanism (unique per-codec staging, cleaned
+// up on failure) this file's atomic-commit rework added and which was
+// left with no real coverage.
+//
+// The failure is forced on the FIRST codec (alac) rather than only the
+// second (flac, after alac has already succeeded). Making it fail only on
+// the second codec deterministically would mean swapping the source out
+// from under BuildAllSegmentSets between its two BuildSegmentSet calls --
+// a timing dependency for no real gain, since the staged-file cleanup
+// this test exists to cover doesn't care which codec failed, only that a
+// build failure happened after some staging files already existed.
+func TestBuildAllSegmentSetsRemovesStagedFilesOnBuildFailure(t *testing.T) {
+	requireFFmpeg(t)
 	dir := t.TempDir()
-	src := makeSourceWAV(t, dir, 12)
 
-	flacOut := filepath.Join(dir, "gapless-flac.mp4")
-	if err := os.Mkdir(flacOut, 0755); err != nil {
-		t.Fatalf("pre-create flac output path as a directory: %v", err)
+	src := filepath.Join(dir, "source.wav")
+	if err := os.WriteFile(src, []byte("not actually audio"), 0o644); err != nil {
+		t.Fatalf("write bogus source: %v", err)
 	}
-
-	alacOut := filepath.Join(dir, "gapless-alac.mp4")
 
 	if _, err := BuildAllSegmentSets(src, dir, "pcm_s16le"); err == nil {
-		t.Fatal("BuildAllSegmentSets() error = nil, want error from the blocked flac output path")
+		t.Fatal("BuildAllSegmentSets() error = nil for a non-audio source, want error")
 	}
 
-	if _, statErr := os.Stat(alacOut); !os.IsNotExist(statErr) {
-		t.Errorf("alac output left behind at %s after flac failure: stat err = %v", alacOut, statErr)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read version dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() == "source.wav" {
+			continue
+		}
+		t.Errorf("unexpected leftover entry %q in version dir after a build failure", e.Name())
 	}
 }
 
 // TestBuildAllSegmentSetsPreflightsAllDestinationsBeforeCommitting proves
 // the commit step checks every codec's final destination before renaming
 // any of them, rather than discovering a blocked destination partway
-// through the commit loop and leaving a partial commit behind. It reuses
-// the same forced FLAC failure as
-// TestBuildAllSegmentSetsCleansUpPreviouslyBuiltFiles (a pre-created
-// directory at gapless-flac.mp4), but asserts on the commit step
-// specifically: since ALAC's build succeeds first, an implementation that
-// renames as it goes (rather than checking every destination up front)
-// would commit gapless-alac.mp4 before ever attempting FLAC's blocked
-// rename. Preflighting both destinations first must catch the problem
-// before that ALAC rename ever runs.
+// through the commit loop and leaving a partial commit behind. It forces
+// a deterministic failure by pre-creating a directory at the flac output
+// path, so preflightCommitDestinations (not the build, which now targets
+// a unique staging file first) refuses that destination. Since ALAC's
+// build succeeds first, an implementation that renamed as it goes (rather
+// than checking every destination up front) would commit
+// gapless-alac.mp4 before ever attempting FLAC's blocked rename.
+// Preflighting both destinations first must catch the problem before that
+// ALAC rename ever runs.
 func TestBuildAllSegmentSetsPreflightsAllDestinationsBeforeCommitting(t *testing.T) {
 	dir := t.TempDir()
 	src := makeSourceWAV(t, dir, 12)
@@ -280,6 +305,68 @@ func TestBuildAllSegmentSetsPreflightsAllDestinationsBeforeCommitting(t *testing
 			continue // pre-existing fixtures, not this call's output
 		}
 		t.Errorf("unexpected leftover entry %q in version dir after preflight failure", e.Name())
+	}
+}
+
+// TestBuildAllSegmentSetsSweepsStaleStagingFiles proves BuildAllSegmentSets
+// removes an orphaned staging file old enough to be from a killed run,
+// while leaving a recent one -- which could belong to a build genuinely in
+// progress -- untouched. It plants one staged-looking file per codec
+// pattern with an old mtime (via os.Chtimes) and one with a fresh mtime,
+// then runs a real build and checks which survived.
+func TestBuildAllSegmentSetsSweepsStaleStagingFiles(t *testing.T) {
+	dir := t.TempDir()
+	src := makeSourceWAV(t, dir, 6)
+
+	oldStaging := filepath.Join(dir, "gapless-alac-oldorphan.mp4")
+	if err := os.WriteFile(oldStaging, []byte("orphaned by a killed run"), 0o644); err != nil {
+		t.Fatalf("write old staging file: %v", err)
+	}
+	old := time.Now().Add(-2 * staleStagingAge)
+	if err := os.Chtimes(oldStaging, old, old); err != nil {
+		t.Fatalf("Chtimes old staging file: %v", err)
+	}
+
+	recentStaging := filepath.Join(dir, "gapless-flac-inprogress.mp4")
+	if err := os.WriteFile(recentStaging, []byte("a build genuinely in progress"), 0o644); err != nil {
+		t.Fatalf("write recent staging file: %v", err)
+	}
+	// Leave recentStaging's mtime at "now" -- it must look live.
+
+	if _, err := BuildAllSegmentSets(src, dir, "pcm_s16le"); err != nil {
+		t.Fatalf("BuildAllSegmentSets() error = %v", err)
+	}
+
+	if _, statErr := os.Stat(oldStaging); !os.IsNotExist(statErr) {
+		t.Errorf("stale staging file %s survived a build, want swept: stat err = %v", oldStaging, statErr)
+	}
+	if _, statErr := os.Stat(recentStaging); statErr != nil {
+		t.Errorf("recent staging file %s was swept, want preserved: %v", recentStaging, statErr)
+	}
+}
+
+// TestSweepStaleStagingFilesNeverMatchesAFinalPath verifies, rather than
+// assumes, that the sweep's glob pattern cannot match a completed set's
+// final path: "gapless-alac.mp4" has no hyphen after the codec, while the
+// pattern requires one ("gapless-alac-*.mp4*"). A final file, even one
+// old enough that an age-only check would remove it, must survive.
+func TestSweepStaleStagingFilesNeverMatchesAFinalPath(t *testing.T) {
+	dir := t.TempDir()
+	finalPath := filepath.Join(dir, "gapless-alac.mp4")
+	if err := os.WriteFile(finalPath, []byte("a real completed segment set"), 0o644); err != nil {
+		t.Fatalf("write final file: %v", err)
+	}
+	old := time.Now().Add(-2 * staleStagingAge)
+	if err := os.Chtimes(finalPath, old, old); err != nil {
+		t.Fatalf("Chtimes final file: %v", err)
+	}
+
+	if err := sweepStaleFiles(filepath.Join(dir, "gapless-alac-*.mp4*"), staleStagingAge); err != nil {
+		t.Fatalf("sweepStaleFiles() error = %v", err)
+	}
+
+	if _, statErr := os.Stat(finalPath); statErr != nil {
+		t.Fatalf("final file %s was swept: %v", finalPath, statErr)
 	}
 }
 

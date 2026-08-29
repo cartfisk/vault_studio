@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // FragmentDurationMicros is the fragment duration requested of ffmpeg.
@@ -16,6 +17,18 @@ const FragmentDurationMicros = 10000000
 
 // fragMovFlags is the invocation proven on hardware by the MSE spike.
 const fragMovFlags = "+frag_keyframe+empty_moov+default_base_moof"
+
+// staleStagingAge is how old an orphaned staging or preflight-probe file
+// must be before sweepStaleFiles will remove it. A generate-segments run
+// stopped mid-build (a SIGINT, the expected way to stop one) leaves its
+// unique os.CreateTemp staging file behind forever otherwise -- nothing
+// else in the codebase globs, sweeps, or reconciles these at startup. An
+// hour is conservative: no single codec's build is expected to run
+// anywhere near that long. This floor must stay well above any real build
+// duration, or a sweep could delete a concurrent builder's still-live
+// staging file, which would defeat the collision-freedom os.CreateTemp
+// exists to provide.
+const staleStagingAge = time.Hour
 
 // SegmentCodecs are the lossless codecs served for gapless playback, one per
 // browser engine: ALAC for Safari, FLAC for Chrome and Firefox.
@@ -39,14 +52,18 @@ type SegmentSet struct {
 // measures what it produced, and only then places it at outputPath.
 //
 // ffmpeg writes and probes/scans happen against outputPath+".tmp", never
-// outputPath itself. Both the backfill command and the async transcoder can
-// target the same outputPath for an existing version -- ffmpeg's -y
-// truncates in place, and a reader (http.ServeContent serving a completed
-// set, or a concurrent backfill run measuring one) could observe a
-// half-written file if either wrote there directly. Writing to the tmp path
-// and renaming into place once the build is fully validated means any
-// concurrent reader sees either the old complete file or the new one, never
-// a partial one -- rename is atomic within a filesystem.
+// outputPath itself, and the produced file is renamed onto outputPath only
+// once the build is fully validated. No production caller passes a final
+// gapless-<codec>.mp4 path here any more -- BuildAllSegmentSets always
+// hands this a unique staging path from os.CreateTemp -- but the mechanism
+// stays load-bearing rather than vestigial: os.CreateTemp creates
+// outputPath as an empty placeholder to reserve the name, and this
+// function's rename is what overwrites that placeholder with the real,
+// validated file. Whatever currently has outputPath open (a concurrent
+// build racing to reserve the same name is not expected, but
+// TestBuildSegmentSetIsAtomicToConcurrentReaders holds this guarantee
+// directly) never observes a half-written file, because rename is atomic
+// within a filesystem.
 //
 // When sourceCodec already matches targetCodec the audio is stream-copied.
 // That is a whole-file remux with no -ss/-t, so it keeps every frame; it is
@@ -172,7 +189,24 @@ func BuildAllSegmentSets(sourcePath, versionDir, sourceCodec string) (sets []*Se
 		}
 	}()
 
+	// A unique os.CreateTemp name, unlike the old fixed ".tmp" name it
+	// replaced, is never reclaimed by anything else in the codebase: there
+	// is no sweep, no glob, no startup reconciliation. An operator
+	// Ctrl-C'ing a multi-hour run (the expected way to stop one) kills the
+	// process before the deferred cleanup above ever runs, so this sweeps
+	// any staging or preflight-probe file old enough to be orphaned before
+	// creating new ones. The age floor is not optional: an unconditional
+	// sweep would delete a concurrent builder's live staging file,
+	// destroying the collision-freedom os.CreateTemp exists to provide.
+	if serr := sweepStaleFiles(filepath.Join(versionDir, ".gapless-preflight-*"), staleStagingAge); serr != nil {
+		return nil, fmt.Errorf("sweep stale preflight probes: %w", serr)
+	}
+
 	for _, codec := range SegmentCodecs {
+		if serr := sweepStaleFiles(filepath.Join(versionDir, "gapless-"+codec+"-*.mp4*"), staleStagingAge); serr != nil {
+			return nil, fmt.Errorf("sweep stale %s staging files: %w", codec, serr)
+		}
+
 		// os.CreateTemp both allocates a unique name and creates the file,
 		// so two concurrent builders (or a concurrent backfill run) can
 		// never collide on the same staging path. BuildSegmentSet writes
@@ -232,10 +266,15 @@ func BuildAllSegmentSets(sourcePath, versionDir, sourceCodec string) (sets []*Se
 		// mean saving the bytes a rename is about to overwrite before
 		// performing it, which is materially more machinery than this
 		// earns. The resulting state -- some codecs committed, one
-		// rename failed -- is a partial commit, but it is no worse than
-		// the partial state this whole file already tolerated before the
-		// atomic-commit change existed. The caller marks the set failed
-		// and a rerun repairs it, same as any other build failure.
+		// rename failed -- can leave a completed row whose file was
+		// already swapped for a rebuild whose sibling never landed. That
+		// divergence is real, not fictional, but it is benign as long as
+		// two ffmpeg builds of the same source stay byte-identical (which
+		// they are today, verified by MD5): the stale byte ranges a
+		// concurrent reader already has still describe the new file
+		// correctly. An ffmpeg version upgrade that changes its output
+		// determinism would need this revisited. The caller marks the set
+		// failed and a rerun repairs it, same as any other build failure.
 		if rerr := os.Rename(set.FilePath, finalPaths[i]); rerr != nil {
 			err = fmt.Errorf("commit %s into place: %w", set.Codec, rerr)
 			return nil, err
@@ -271,6 +310,35 @@ func preflightCommitDestinations(finalPaths []string) error {
 		probePath := probe.Name()
 		probe.Close()
 		os.Remove(probePath)
+	}
+	return nil
+}
+
+// sweepStaleFiles removes every file matching pattern whose modification
+// time is older than maxAge. pattern is a filepath.Glob pattern, not a
+// directory -- callers scope it to exactly the staging or preflight-probe
+// names they own so this can never touch anything else, in particular a
+// final gapless-<codec>.mp4 path (verified directly by
+// TestSweepStaleStagingFilesNeverMatchesAFinalPath: "gapless-alac.mp4" has
+// no hyphen after the codec, so "gapless-alac-*.mp4*" does not match it).
+// A glob or stat error is reported; a file that vanished between the glob
+// and the stat (removed by a concurrent sweep or its own owner finishing)
+// is silently skipped rather than treated as a failure.
+func sweepStaleFiles(pattern string, maxAge time.Duration) error {
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("glob %s: %w", pattern, err)
+	}
+
+	cutoff := time.Now().Add(-maxAge)
+	for _, match := range matches {
+		info, statErr := os.Stat(match)
+		if statErr != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			os.Remove(match)
+		}
 	}
 	return nil
 }

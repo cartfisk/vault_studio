@@ -144,7 +144,11 @@ func runBackfill(ctx context.Context, database *db.DB, dryRun, verbose bool) (ba
 // wouldn't save it if the other codec then failed persistently, since a
 // rebuilt copy would still land on top of it. Building first means a
 // build failure never touches an existing row at all, and the query picks
-// the version back up on the next run, which is correct for a repair tool.
+// the version back up on the next run, which is correct for a repair
+// tool. The tradeoff: a version with no rows yet whose build fails leaves
+// no database record at all, so an operator reading the table directly
+// cannot distinguish "never attempted" from "fails every time" without
+// checking the command's own log output.
 func backfillVersion(ctx context.Context, database *db.DB, versionID int64, sourcePath, sourceCodec string) error {
 	versionDir := filepath.Dir(sourcePath)
 

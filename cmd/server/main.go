@@ -238,7 +238,7 @@ func main() {
 	prefsHandler := handlers.NewPreferencesHandler(database)
 	statsHandler := handlers.NewStatsHandler(database, Version, CommitSHA)
 	instanceHandler := handlers.NewInstanceHandler(database, config.DataDir, wsHub)
-	mediaHandler := handlers.NewMediaHandler(config.AuthConfig)
+	mediaHandler := handlers.NewMediaHandler(config.AuthConfig, database)
 	projectsHandler := projects.NewProjectsHandler(svc.Projects, database, config.DataDir)
 	foldersHandler := handlers.NewFoldersHandler(database)
 	tracksHandler := tracks.NewTracksHandler(database, storageAdapter, transcoder)
@@ -374,6 +374,7 @@ func main() {
 	mux.Handle("DELETE /api/versions/{id}", authMW(httputil.Wrap(versionsHandler.DeleteVersion)))
 
 	mux.Handle("GET /api/stream/{id}", optionalAuthMW(signedURLMW(httputil.Wrap(streamingHandler.StreamTrack))))
+	mux.Handle("GET /api/stream/{id}/gapless/{codec}", authMW(httputil.Wrap(streamingHandler.StreamGapless)))
 
 	mux.Handle("POST /api/tracks/{id}/share", authMW(httputil.Wrap(sharingHandler.CreateShareToken)))
 	mux.Handle("GET /api/share", authMW(httputil.Wrap(sharingHandler.ListShareTokens)))

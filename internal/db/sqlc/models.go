@@ -229,6 +229,27 @@ type TrackFile struct {
 	OriginalFilename  sql.NullString `json:"original_filename"`
 }
 
+type TrackSegmentFragment struct {
+	SetID     int64 `json:"set_id"`
+	Idx       int64 `json:"idx"`
+	ByteStart int64 `json:"byte_start"`
+	ByteEnd   int64 `json:"byte_end"`
+}
+
+type TrackSegmentSet struct {
+	ID          int64     `json:"id"`
+	VersionID   int64     `json:"version_id"`
+	Codec       string    `json:"codec"`
+	FilePath    string    `json:"file_path"`
+	FileSize    int64     `json:"file_size"`
+	SampleRate  int64     `json:"sample_rate"`
+	SampleCount int64     `json:"sample_count"`
+	Channels    int64     `json:"channels"`
+	InitByteEnd int64     `json:"init_byte_end"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 type TrackVersion struct {
 	ID              int64           `json:"id"`
 	TrackID         int64           `json:"track_id"`

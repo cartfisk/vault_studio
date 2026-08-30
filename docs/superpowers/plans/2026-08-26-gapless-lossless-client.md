@@ -15,7 +15,7 @@
 - **The queue-relative offset must never escape an engine.** Everything outside reads track-relative time. A leaked offset anchors waveform comments at the wrong moment — a data-correctness bug that looks like a UI glitch.
 - **Codec selection is `isTypeSupported` only, never user agent.**
 - **No client-side trimming, ever.** ALAC and FLAC carry no encoder priming.
-- **Timeline offsets are a running sum of true durations**, computed from `sampleCount / sampleRate` as exact integer arithmetic. Never `duration * index`. Never a float read off the element.
+- **Timeline offsets are a running sum of true durations, in SECONDS.** Each track's duration is computed exactly at its own rate (`sampleCount / sampleRate`); those seconds are summed. Never `duration * index` — durations vary. Never a running sum of raw sample counts — counts at different rates are not the same unit, and summing them placed tracks up to 177ms wrong in a mixed 44.1/48kHz queue. Never a float duration read off the element.
 - **`LEAD_SECONDS` is 30.** Append only when the buffer is within that of the playhead; evict beyond it behind. Appending faster than playback is what exhausted Safari's ~15MB audio quota during the spike.
 - **`loop` must never be set on the MSE element** — it would loop the whole timeline.
 - **`MusicPlayer.swapOrder.test.tsx` must keep passing unmodified.** It is the guard proving `ElementPairEngine` was moved, not rewritten.
@@ -57,6 +57,28 @@ Tasks 1-5 are purely additive: new files only, no existing file modified. Tasks 
 ---
 
 ## Task 1: Timeline arithmetic
+
+> **Corrected during execution — the code below is superseded.**
+>
+> This task's original code accumulated `offsetSamples`, a running sum of raw
+> sample counts, then divided by the current track's `sampleRate`. Sample counts
+> from tracks at different rates are not the same unit, so a mixed 44.1kHz /
+> 48kHz queue placed tracks 81ms and then 177ms wrong, compounding.
+>
+> It shipped and passed because every test used one uniform sample rate.
+>
+> The reasoning behind it was also wrong: integer samples were chosen to avoid
+> float drift, and that concern was measured as false — summing 1000 track
+> durations in float seconds drifts 1.5e-11s against a 2.27e-5s sample period.
+>
+> The shipped implementation sums SECONDS, computing each track's duration
+> exactly at its own rate. Read `frontend/src/lib/playback/timeline.ts`, not the
+> code blocks below. `PlacedTrack.offsetSamples` is now `offsetSeconds`, and
+> `trackTimeFor`'s end-of-track guard carries a one-sample epsilon.
+>
+> The general lesson: a precaution against a problem you have not measured can
+> cost more than the problem.
+
 
 **Files:**
 - Create: `frontend/src/lib/playback/types.ts`

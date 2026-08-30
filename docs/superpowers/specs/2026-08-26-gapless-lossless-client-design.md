@@ -116,10 +116,26 @@ lossless runs. An all-MP3 album is exactly what it is today.
 ## Inside MseEngine
 
 **Timeline.** One `SourceBuffer`, `mode = 'segments'`. Each track is appended at
-a `timestampOffset` equal to the running sum of the true durations before it,
-computed from `sampleCount / sampleRate` as exact rational arithmetic. Never
-`duration * index` — track durations vary. Never a float duration read off the
-element.
+a `timestampOffset` equal to the running sum of the true durations before it.
+
+Each track's own duration is computed exactly at its own rate,
+`sampleCount / sampleRate`. Those per-track seconds are then summed.
+
+Two mistakes this avoids, both of which this project made:
+
+- `duration * index` puts every later track in the wrong place, because track
+  durations vary. The offset must be a running SUM.
+- Summing raw sample COUNTS across tracks is meaningless when a queue mixes
+  sample rates, which a real lossless library does routinely. An earlier
+  revision of this spec mandated integer samples to avoid float drift; that
+  produced offsets 81ms and then 177ms wrong across a 44.1kHz/48kHz/44.1kHz
+  queue, compounding down the queue.
+
+Float seconds are safe here and the drift concern that motivated samples was
+false: summing 1000 track durations accumulates about 1.5e-11s of error against
+a 2.27e-5s sample period, six orders of magnitude below one sample.
+
+Never a float duration read off the element — that is a different number.
 
 **Appending.** Fetch the manifest, append `bytes=0-initByteEnd` once, then
 fragments in order by Range through the existing API client, so auth works on
@@ -195,7 +211,7 @@ fails. On the backend half this caught two tests that passed either way.
 
 | Unit | Pins |
 |---|---|
-| `timeline.ts` | Running-sum offsets; boundary attribution; exact rational arithmetic with no float drift across a long queue |
+| `timeline.ts` | Running-sum offsets in seconds; boundary attribution; a mixed sample-rate queue placed correctly; a float-tolerant end-of-track guard |
 | `selectEngine.ts` | Lossless + supported codec + completed set → MSE; anything missing → element pair; client codec order decides |
 | `codecSupport.ts` | Built from `isTypeSupported`, never user agent; neither supported → no `codecs` param at all |
 

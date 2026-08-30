@@ -26,7 +26,8 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useWebHaptics } from "web-haptics/react";
 import WaveformComments from "./WaveformComments";
 import { usePreferences } from "../contexts/PreferencesContext";
-import { chooseTransition, normalizeMediaUrl, SILENT_AUDIO_DATA_URI } from "../lib/gaplessPreload";
+import { chooseTransition, normalizeMediaUrl } from "../lib/gaplessPreload";
+import { createElementPairEngine } from "../lib/playback/elementPairEngine";
 
 interface MusicPlayerProps {
   hideControls?: boolean;
@@ -124,6 +125,18 @@ export default function MusicPlayer({
     [],
   );
 
+  // Element-pair swap, iOS unlock, and preload execution live behind the
+  // PlaybackEngine interface. MusicPlayer still owns the elements and the
+  // swap-vs-load decision (`chooseTransition`); the engine takes their refs
+  // and performs the DOM mutations.
+  const engineRef = useRef<ReturnType<typeof createElementPairEngine> | null>(
+    null,
+  );
+  if (!engineRef.current) {
+    engineRef.current = createElementPairEngine({ elA: elARef, elB: elBRef });
+  }
+  const engine = engineRef.current;
+
   // Must run before any effect that reads audioRef.current.
   // No dependency array: the <audio> pair is not mounted on the first render
   // (the component returns null until there is a track or a queue), so an
@@ -137,17 +150,8 @@ export default function MusicPlayer({
   useEffect(() => {
     if (!nextTrackPreload) return;
     const standby = getElement(activeKey === "a" ? "b" : "a");
-    if (!standby) return;
-    if (
-      normalizeMediaUrl(standby.src, window.location.href) ===
-      normalizeMediaUrl(nextTrackPreload.url, window.location.href)
-    )
-      return;
-
-    standby.src = nextTrackPreload.url;
-    standby.volume = volumePercentage / 100;
-    standby.load();
-  }, [nextTrackPreload, activeKey, getElement, volumePercentage]);
+    engine.prepareStandby(standby, nextTrackPreload.url, volumePercentage / 100);
+  }, [nextTrackPreload, activeKey, getElement, volumePercentage, engine]);
 
   const rafIdRef = useRef<number | null>(null);
   const pendingSeekPositionRef = useRef<number | null>(null);
@@ -223,9 +227,6 @@ export default function MusicPlayer({
     e.currentTarget.blur();
   }, []);
 
-  const unlockedRef = useRef(false);
-  const unlockInFlightRef = useRef(false);
-
   /**
    * iOS Safari will not buffer an <audio> element that has never played inside
    * a user gesture, which would leave the standby empty at every swap.
@@ -238,48 +239,14 @@ export default function MusicPlayer({
    * source out from under it.
    *
    * A srcless element rejects play(), so the standby gets a 10ms silent data
-   * URI first, removed again once the unlock settles.
+   * URI first, removed again once the unlock settles. The mechanics live in
+   * `ElementPairEngine.unlockStandby`; this callback just resolves which
+   * element is the standby, same as before.
    */
   const unlockStandbyElement = useCallback(() => {
-    if (unlockedRef.current || unlockInFlightRef.current) return;
-
     const standby = getElement(activeKey === "a" ? "b" : "a");
-    if (!standby) return;
-
-    // Something is already loaded here — leave it alone rather than disturb a
-    // preload. A later gesture will retry.
-    if (standby.getAttribute("src")) return;
-
-    unlockInFlightRef.current = true;
-    const wasMuted = standby.muted;
-    standby.muted = true;
-    standby.src = SILENT_AUDIO_DATA_URI;
-
-    const restore = () => {
-      standby.muted = wasMuted;
-      // Only strip what this routine attached. By the time this runs the
-      // element may legitimately hold a real track.
-      if (standby.getAttribute("src") === SILENT_AUDIO_DATA_URI) {
-        standby.removeAttribute("src");
-        standby.load();
-      }
-      unlockInFlightRef.current = false;
-    };
-
-    standby
-      .play()
-      .then(() => {
-        standby.pause();
-        unlockedRef.current = true;
-        restore();
-      })
-      .catch((error) => {
-        // Leave unlockedRef false so a later gesture retries rather than
-        // silently losing gapless for the rest of the session.
-        console.error("Failed to unlock standby audio element:", error);
-        restore();
-      });
-  }, [activeKey, getElement]);
+    engine.unlockStandby(standby);
+  }, [activeKey, getElement, engine]);
 
   /**
    * The unlock has to happen on the FIRST user gesture of the session, whatever
@@ -294,7 +261,7 @@ export default function MusicPlayer({
    */
   useEffect(() => {
     const handleFirstGesture = () => {
-      if (unlockedRef.current) {
+      if (engine.isStandbyUnlocked()) {
         document.removeEventListener("pointerdown", handleFirstGesture, true);
         return;
       }
@@ -307,22 +274,17 @@ export default function MusicPlayer({
     return () => {
       document.removeEventListener("pointerdown", handleFirstGesture, true);
     };
-  }, [unlockStandbyElement]);
+  }, [unlockStandbyElement, engine]);
 
   /**
    * Pause and detach BOTH elements. The standby can be holding a fully
    * buffered signed stream for the account that just signed out, so logout has
-   * to reach it as well as the active one.
+   * to reach it as well as the active one. Mechanics live in
+   * `ElementPairEngine.teardown`.
    */
   const teardownAudioElements = useCallback(() => {
-    for (const element of [elARef.current, elBRef.current]) {
-      if (!element) continue;
-      element.pause();
-      element.removeAttribute("src");
-      element.load();
-    }
-    unlockedRef.current = false;
-  }, []);
+    engine.teardown();
+  }, [engine]);
 
   const handlePlayPause = useCallback(() => {
     unlockStandbyElement();
@@ -651,65 +613,28 @@ export default function MusicPlayer({
       // `active.pause()` so the queued `pause` event is recognised as stale.
       audioRef.current = standby;
 
-      // Tear the outgoing element down BEFORE starting the incoming one.
-      // A half-finished swap plays two tracks at once, which is worse than a gap.
-      active.pause();
-      active.removeAttribute("src");
-      active.load();
-
-      standby.volume = volumePercentage / 100;
-
-      // `loadedmetadata` fired on the standby ~20s ago, while it had no
-      // listeners bound, and will not fire again for this resource. Without
-      // this, `duration` keeps the previous track's value and mistimes the
-      // next preload.
-      if (Number.isFinite(standby.duration) && standby.duration > 0) {
-        setDuration(standby.duration);
-        onDurationChange(standby.duration);
-      }
+      engine.swapTo(active, standby, {
+        volume: volumePercentage / 100,
+        isPlaying,
+        onDurationKnown: (duration) => {
+          setDuration(duration);
+          onDurationChange(duration);
+        },
+        onPlayingChange,
+      });
 
       setActiveKey(activeKey === "a" ? "b" : "a");
-
-      if (isPlaying) {
-        standby.play().catch((error) => {
-          console.error("Failed to play swapped element:", error);
-          // The outgoing element's `pause` was suppressed as stale, so nothing
-          // else will correct `isPlaying`. Report the real state.
-          onPlayingChange(false);
-        });
-      }
       return;
     }
 
     // Fallback: the existing load path, unchanged.
-    active.src = audioUrl;
-    active.volume = volumePercentage / 100;
-    active.load();
-
-    if (isPlaying) {
-      const handleLoadedData = () => {
-        active.play().catch((error) => {
-          console.error("Failed to play:", error);
-        });
-      };
-
-      active.addEventListener("loadeddata", handleLoadedData, { once: true });
-
-      const handleCanPlay = () => {
-        if (active.paused && active.readyState >= 2) {
-          active.play().catch((error) => {
-            console.error("Failed to play:", error);
-          });
-        }
-      };
-
-      active.addEventListener("canplay", handleCanPlay, { once: true });
-
-      return () => {
-        active.removeEventListener("loadeddata", handleLoadedData);
-        active.removeEventListener("canplay", handleCanPlay);
-      };
-    }
+    return engine.loadFresh(active, audioUrl, {
+      volume: volumePercentage / 100,
+      isPlaying,
+      onPlayError: (error) => {
+        console.error("Failed to play:", error);
+      },
+    });
   }, [
     audioUrl,
     activeKey,
@@ -718,6 +643,7 @@ export default function MusicPlayer({
     volumePercentage,
     onPlayingChange,
     onDurationChange,
+    engine,
   ]);
 
   useEffect(() => {

@@ -34,3 +34,32 @@ export interface PlacedTrack {
 	durationSamples: number;
 	sampleRate: number;
 }
+
+export interface PlaybackEngineEvents {
+	timeupdate?: () => void;
+	trackchange?: (trackId: string) => void;
+	ended?: () => void;
+	error?: (err: unknown) => void;
+}
+
+/**
+ * The shared contract implemented by every playback engine (MSE, and later
+ * an element-pair engine for mixed/lossy queues).
+ *
+ * Kept free of anything MSE-specific — no MediaSource, no SourceBuffer, no
+ * byte ranges in the signatures — so a second implementation can satisfy it
+ * without leaking implementation details into callers.
+ */
+export interface PlaybackEngine {
+	load(trackId: string, versionId: number | null, manifest: GaplessManifest): Promise<void>;
+	play(): Promise<void>;
+	pause(): void;
+	seekToTrackTime(seconds: number): void;
+	getTrackTime(): number;
+	getTrackDuration(): number;
+	setVolume(v: number): void;
+	canAppend(manifest: GaplessManifest | null): boolean;
+	prepareNext(trackId: string, versionId: number | null, manifest: GaplessManifest): Promise<void>;
+	teardown(): void;
+	subscribe(events: PlaybackEngineEvents): () => void;
+}

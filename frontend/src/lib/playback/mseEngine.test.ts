@@ -128,12 +128,26 @@ function manifest(overrides: Partial<GaplessManifest> = {}): GaplessManifest {
 	};
 }
 
-/** Flush every currently-pending microtask, including ones chained by
- *  microtasks scheduled while flushing. Node drains the whole microtask
- *  queue before running a macrotask, so one `setTimeout(0)` is enough
- *  regardless of how deep the chain of awaits goes. */
-function flush(): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, 0));
+/**
+ * Wait until `observe()` stops changing between ticks, instead of assuming
+ * a fixed number of ticks is enough. A fixed-tick flush can silently freeze
+ * the loop mid-run and report whatever count happened to exist at that
+ * point — which looks identical to a working backpressure guard even when
+ * the guard is missing entirely, if the two states are indistinguishable at
+ * that particular tick. Polling to quiescence (with a hard cap so a real
+ * hang fails loudly instead of hanging the suite) reports the loop's actual
+ * settled state: either genuinely blocked waiting on `timeupdate`, or
+ * genuinely finished.
+ */
+async function flushUntilQuiescent(observe: () => number, maxTicks = 50): Promise<void> {
+	let last = observe();
+	for (let i = 0; i < maxTicks; i++) {
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+		const current = observe();
+		if (current === last) return;
+		last = current;
+	}
+	throw new Error(`flushUntilQuiescent: still changing after ${maxTicks} ticks (last=${last})`);
 }
 
 function makeEngine(opts: { secondsPerAppend?: number; fetchRange?: ReturnType<typeof vi.fn> } = {}) {
@@ -169,24 +183,45 @@ describe("createMseEngine", () => {
 		const { fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
 
 		await engine.load("a", 1, manifest({ fragments: Array.from({ length: 10 }, (_, i) => ({ start: i, end: i })) }));
-		await flush();
+		await flushUntilQuiescent(() => fetchRange.mock.calls.length);
 
 		expect(fetchRange.mock.calls.length).toBeGreaterThan(0);
 		expect(fetchRange.mock.calls.length).toBeLessThan(11);
 	});
 
+	it("also applies backpressure before appending a queued next track's init bytes, not only its fragments", async () => {
+		// Track "a" has exactly one fragment, sized (with secondsPerAppend)
+		// so that by the time its init + one fragment have landed, the
+		// buffer is already past LEAD_SECONDS. The very next decision the
+		// loop makes is whether to append track "b"'s init bytes — this is
+		// the ONLY place that decision is observable in isolation, because
+		// in a single-track queue the init append always happens at
+		// bufferedAhead() === 0 and can never be blocked, no matter whether
+		// its own guard is present. A test that only ever loads one track
+		// cannot tell a working init-append guard from a missing one.
+		const { fetchRange, engine } = makeEngine({ secondsPerAppend: 20 });
+
+		await engine.load("a", 1, manifest({ fragments: [{ start: 0, end: 0 }] }));
+		await engine.prepareNext("b", 2, manifest({ fragments: [{ start: 0, end: 0 }] }));
+		await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+
+		// init(a)=20s, frag0(a)=40s -> bufferedAhead is 40, over the 30s
+		// lead, so track b's init must not be fetched yet.
+		expect(fetchRange.mock.calls.length).toBe(2);
+	});
+
 	it("evicts buffered data behind currentTime - LEAD_SECONDS, and never ahead of currentTime", async () => {
-		const { element, engine } = makeEngine({ secondsPerAppend: 10 });
+		const { element, engine, fetchRange } = makeEngine({ secondsPerAppend: 10 });
 
 		await engine.load("a", 1, manifest());
-		await flush();
+		await flushUntilQuiescent(() => fetchRange.mock.calls.length);
 
 		// currentTime pinned at 0 so far: nothing should have been evicted
 		// yet (cutoff would be negative).
 		expect(element.listenerCount("timeupdate")).toBeGreaterThan(0);
 
 		element.advanceTime(40);
-		await flush();
+		await flushUntilQuiescent(() => fetchRange.mock.calls.length);
 
 		const removeCalls = (element.srcObject as FakeMediaSource).sourceBuffers[0].removeCalls;
 		expect(removeCalls.length).toBeGreaterThan(0);
@@ -203,7 +238,7 @@ describe("createMseEngine", () => {
 		const m = manifest({ initByteEnd: 710 });
 
 		await engine.load("a", 1, m);
-		await flush();
+		await flushUntilQuiescent(() => fetchRange.mock.calls.length);
 
 		const initCalls = fetchRange.mock.calls.filter(([, start, end]) => start === 0 && end === 710);
 		expect(initCalls).toHaveLength(1);
@@ -214,7 +249,7 @@ describe("createMseEngine", () => {
 		const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
 
 		await engine.load("a", 1, manifest());
-		await flush();
+		await flushUntilQuiescent(() => fetchRange.mock.calls.length);
 
 		// The loop should now be blocked on a pending `timeupdate` wait, plus
 		// the engine's own trackchange/timeupdate listener.
@@ -222,14 +257,12 @@ describe("createMseEngine", () => {
 
 		const callsBeforeTeardown = fetchRange.mock.calls.length;
 		engine.teardown();
-		await flush();
+		await flushUntilQuiescent(() => element.listenerCount("timeupdate"));
 
 		// The pending wait's own listener, and the engine's permanent one,
 		// must both be gone — proof the wait actually resolved rather than
 		// hanging forever.
 		expect(element.listenerCount("timeupdate")).toBe(0);
-
-		await flush();
 		expect(fetchRange.mock.calls.length).toBe(callsBeforeTeardown);
 	});
 
@@ -255,7 +288,7 @@ describe("createMseEngine", () => {
 		engine.subscribe({ error: onError });
 
 		await engine.load("a", 1, manifest());
-		await flush();
+		await flushUntilQuiescent(() => onError.mock.calls.length);
 
 		expect(onError).toHaveBeenCalledTimes(1);
 		expect(onError.mock.calls[0][0]).toBeInstanceOf(Error);

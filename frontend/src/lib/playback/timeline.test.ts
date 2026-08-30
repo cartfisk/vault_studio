@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
 	durationSeconds,
 	elementTimeFor,
-	offsetSeconds,
 	placeTrack,
 	trackTimeFor,
 } from "@/lib/playback/timeline";
@@ -24,7 +23,7 @@ function manifest(sampleCount: number, sampleRate = 44100): GaplessManifest {
 describe("placeTrack", () => {
 	it("places the first track at zero", () => {
 		const t = placeTrack([], "a", 1, manifest(44100));
-		expect(t.offsetSamples).toBe(0);
+		expect(t.offsetSeconds).toBe(0);
 		expect(t.durationSamples).toBe(44100);
 	});
 
@@ -34,9 +33,23 @@ describe("placeTrack", () => {
 		placed.push(placeTrack(placed, "b", 2, manifest(66150)));       // 1.5s
 		placed.push(placeTrack(placed, "c", 3, manifest(22050)));       // 0.5s
 
-		expect(placed[0].offsetSamples).toBe(0);
-		expect(placed[1].offsetSamples).toBe(44100);
-		expect(placed[2].offsetSamples).toBe(110250);
+		expect(placed[0].offsetSeconds).toBeCloseTo(0, 9);
+		expect(placed[1].offsetSeconds).toBeCloseTo(1.0, 9);
+		expect(placed[2].offsetSeconds).toBeCloseTo(2.5, 9);
+	});
+
+	it("places tracks at different sample rates using the running sum of SECONDS, not raw sample counts", () => {
+		// A real lossless library mixes 44.1kHz and 48kHz masters routinely.
+		// Sample counts from different rates are not the same unit and cannot
+		// be summed directly.
+		const placed: PlacedTrack[] = [];
+		placed.push(placeTrack(placed, "a", 1, manifest(44100, 44100)));  // 1.000s @ 44.1k
+		placed.push(placeTrack(placed, "b", 2, manifest(96000, 48000)));  // 2.000s @ 48k
+		placed.push(placeTrack(placed, "c", 3, manifest(44100, 44100)));  // 1.000s @ 44.1k
+
+		expect(placed[0].offsetSeconds).toBeCloseTo(0, 9);
+		expect(placed[1].offsetSeconds).toBeCloseTo(1.0, 9);
+		expect(placed[2].offsetSeconds).toBeCloseTo(3.0, 9);
 	});
 
 	it("does not accumulate float error across a long queue", () => {
@@ -45,8 +58,9 @@ describe("placeTrack", () => {
 		for (let i = 0; i < 500; i++) {
 			placed.push(placeTrack(placed, `t${i}`, i, manifest(44099)));
 		}
-		// Integer sample arithmetic must be exact, however long the queue.
-		expect(placed[499].offsetSamples).toBe(44099 * 499);
+		// Summing per-track seconds must stay accurate to well under a sample
+		// period, however long the queue.
+		expect(placed[499].offsetSeconds).toBeCloseTo((44099 * 499) / 44100, 9);
 	});
 });
 
@@ -80,6 +94,34 @@ describe("trackTimeFor", () => {
 	it("returns null for an empty timeline", () => {
 		expect(trackTimeFor([], 0)).toBeNull();
 	});
+
+	it("resolves the right track and track-relative time across a mixed-rate boundary", () => {
+		const mixed: PlacedTrack[] = [];
+		mixed.push(placeTrack(mixed, "a", 1, manifest(44100, 44100)));  // 1.000s @ 44.1k
+		mixed.push(placeTrack(mixed, "b", 2, manifest(96000, 48000)));  // 2.000s @ 48k
+
+		const justBeforeBoundary = trackTimeFor(mixed, 0.999);
+		expect(justBeforeBoundary?.track.trackId).toBe("a");
+		expect(justBeforeBoundary?.trackTime).toBeCloseTo(0.999, 9);
+
+		const atBoundary = trackTimeFor(mixed, 1.0);
+		expect(atBoundary?.track.trackId).toBe("b");
+		expect(atBoundary?.trackTime).toBeCloseTo(0, 9);
+
+		const insideSecond = trackTimeFor(mixed, 2.5);
+		expect(insideSecond?.track.trackId).toBe("b");
+		expect(insideSecond?.trackTime).toBeCloseTo(1.5, 9);
+	});
+
+	it("tolerates a currentTime a hair past a track's mathematical end (one sample period of slack)", () => {
+		const singleTrack: PlacedTrack[] = [placeTrack([], "a", 1, manifest(44100, 44100))];
+		const duration = durationSeconds(singleTrack[0]);
+		const hairPast = duration + 1 / singleTrack[0].sampleRate / 2;
+
+		const got = trackTimeFor(singleTrack, hairPast);
+		expect(got?.track.trackId).toBe("a");
+		expect(got?.trackTime).toBeCloseTo(hairPast, 9);
+	});
 });
 
 describe("elementTimeFor", () => {
@@ -97,13 +139,13 @@ describe("elementTimeFor", () => {
 	});
 });
 
-describe("offsetSeconds and durationSeconds", () => {
-	it("convert samples to seconds at the track's own rate", () => {
+describe("durationSeconds", () => {
+	it("converts samples to seconds at the track's own rate", () => {
 		const placed: PlacedTrack[] = [];
 		placed.push(placeTrack(placed, "a", 1, manifest(48000, 48000)));
 		placed.push(placeTrack(placed, "b", 2, manifest(96000, 48000)));
 
-		expect(offsetSeconds(placed[1])).toBeCloseTo(1.0, 9);
+		expect(placed[1].offsetSeconds).toBeCloseTo(1.0, 9);
 		expect(durationSeconds(placed[1])).toBeCloseTo(2.0, 9);
 	});
 });

@@ -19,15 +19,18 @@ export interface GaplessManifest {
 	fragments: FragmentRange[];
 }
 
-/** One track's position on the shared MSE timeline.
- *
- *  Offsets and durations are in SAMPLES, not seconds, so a long queue cannot
- *  accumulate float error. Seconds are derived only at the boundary, by
- *  offsetSeconds/durationSeconds. */
+/** One track's position on the shared MSE timeline. */
 export interface PlacedTrack {
 	trackId: string;
 	versionId: number | null;
-	offsetSamples: number;
+	/** Seconds from the start of the shared timeline.
+	 *
+	 *  Seconds, not samples: sample counts from tracks at different rates are
+	 *  not the same unit and cannot be summed. Each track's duration is
+	 *  computed exactly at its own rate, and only those seconds are added.
+	 *  Float accumulation is safe here — summing 1000 track durations drifts
+	 *  about 1.5e-11s, six orders of magnitude below one sample period. */
+	offsetSeconds: number;
 	durationSamples: number;
 	sampleRate: number;
 }

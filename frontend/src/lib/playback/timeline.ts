@@ -3,9 +3,11 @@ import type { GaplessManifest, PlacedTrack } from "@/lib/playback/types";
 /**
  * Position a track after everything already placed.
  *
- * The offset is a running sum of true sample counts. It is NOT
- * `duration * index` — track durations vary, and that mistake puts every
- * later track in the queue at the wrong place.
+ * The offset is a running sum of each track's own duration in seconds. It is
+ * NOT a sum of raw sample counts — sample counts from tracks at different
+ * sample rates are not the same unit and cannot be summed directly. It is
+ * also NOT `duration * index` — track durations vary, and that mistake puts
+ * every later track in the queue at the wrong place.
  */
 export function placeTrack(
 	placed: PlacedTrack[],
@@ -14,19 +16,15 @@ export function placeTrack(
 	manifest: GaplessManifest,
 ): PlacedTrack {
 	const last = placed[placed.length - 1];
-	const offsetSamples = last ? last.offsetSamples + last.durationSamples : 0;
+	const offsetSeconds = last ? last.offsetSeconds + durationSeconds(last) : 0;
 
 	return {
 		trackId,
 		versionId,
-		offsetSamples,
+		offsetSeconds,
 		durationSamples: manifest.sampleCount,
 		sampleRate: manifest.sampleRate,
 	};
-}
-
-export function offsetSeconds(track: PlacedTrack): number {
-	return track.offsetSamples / track.sampleRate;
 }
 
 export function durationSeconds(track: PlacedTrack): number {
@@ -49,10 +47,16 @@ export function trackTimeFor(
 ): { track: PlacedTrack; trackTime: number } | null {
 	for (let i = placed.length - 1; i >= 0; i--) {
 		const track = placed[i];
-		const start = offsetSeconds(track);
+		const start = track.offsetSeconds;
 		if (elementTime >= start) {
 			const trackTime = elementTime - start;
-			if (trackTime > durationSeconds(track)) return null;
+			// elementTime comes from the browser's reported currentTime;
+			// durationSeconds is computed independently from the manifest. They
+			// need not agree to the last bit, so allow one sample period of
+			// slack at the track's own rate — otherwise a legitimate final
+			// sample can fall fractionally outside and wrongly return null.
+			const epsilon = 1 / track.sampleRate;
+			if (trackTime > durationSeconds(track) + epsilon) return null;
 			return { track, trackTime };
 		}
 	}
@@ -62,5 +66,5 @@ export function trackTimeFor(
 /** Inverse of trackTimeFor: where on the element timeline a track-relative
  *  position lives. Used for seeking. */
 export function elementTimeFor(track: PlacedTrack, trackTime: number): number {
-	return offsetSeconds(track) + trackTime;
+	return track.offsetSeconds + trackTime;
 }

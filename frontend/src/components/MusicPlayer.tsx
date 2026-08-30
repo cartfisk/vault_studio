@@ -117,8 +117,28 @@ export default function MusicPlayer({
   // call site and `audioPlayerRef.current = { audio: audioRef }` keep working.
   const elARef = useRef<HTMLAudioElement | null>(null);
   const elBRef = useRef<HTMLAudioElement | null>(null);
+  // `activeKey` is owned here, as React state, not inside `elementPairEngine`.
+  // The engine also keeps a private `activeKey`, but nothing in this
+  // component calls the engine methods that read or write it
+  // (`engine.load()` / `engine.prepareNext()`) — MusicPlayer only calls the
+  // low-level methods (`swapTo`/`loadFresh`/`prepareStandby`/`unlockStandby`),
+  // which take the active/standby elements explicitly and never touch the
+  // engine's internal copy. So the engine's private `activeKey` is dead code
+  // today and cannot drift from this state. If a later change starts routing
+  // through `engine.load()`/`engine.prepareNext()` (the gapless orchestrator
+  // is the likely place), the engine's internal tracking becomes live again
+  // and would need to either read this state instead or be the sole owner —
+  // that requires a signature change to `createElementPairEngine`, which is
+  // out of scope here since `elementPairEngine.ts` is not to be modified in
+  // this task.
   const [activeKey, setActiveKey] = useState<"a" | "b">("a");
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  // Third element, MSE-only. Never `loop` — looping this element would loop
+  // the whole shared MSE timeline, not the current track. Only this element
+  // sets `disableRemotePlayback`; ManagedMediaSource refuses to attach
+  // otherwise, and this has been measured not to break AirPlay, since
+  // system-level routing still works.
+  const mseElRef = useRef<HTMLAudioElement | null>(null);
 
   const getElement = useCallback(
     (key: "a" | "b") => (key === "a" ? elARef.current : elBRef.current),
@@ -248,6 +268,62 @@ export default function MusicPlayer({
     engine.unlockStandby(standby);
   }, [activeKey, getElement, engine]);
 
+  const mseUnlockedRef = useRef(false);
+  const mseUnlockInFlightRef = useRef(false);
+
+  /**
+   * Same iOS constraint as the standby element, applied to the MSE element:
+   * an element that has never played inside a user gesture will not buffer,
+   * so unlocking it lazily at the first lossless track means that track
+   * silently never plays.
+   *
+   * Unlike the standby, no silent data URI is needed — attaching a
+   * `MediaSource` via `srcObject` is itself enough to make `play()`
+   * resolvable. The gesture is still required, so this attaches a throwaway
+   * `MediaSource` (never the real gapless one; `mseEngine.load()` attaches
+   * its own later) and plays it muted, synchronously inside the gesture
+   * stack, mirroring `unlockStandbyElement` above.
+   *
+   * If this browser has no MediaSource/ManagedMediaSource implementation at
+   * all, there is nothing to unlock and no lossless track will ever route to
+   * this element (`selectEngine` falls back to `elementPair`), so this is a
+   * silent no-op rather than an error.
+   */
+  const unlockMseElement = useCallback(() => {
+    if (mseUnlockedRef.current || mseUnlockInFlightRef.current) return;
+    const el = mseElRef.current;
+    if (!el) return;
+
+    const w = window as unknown as {
+      ManagedMediaSource?: typeof MediaSource;
+      MediaSource?: typeof MediaSource;
+    };
+    const MediaSourceImpl = w.ManagedMediaSource ?? w.MediaSource;
+    if (!MediaSourceImpl) return;
+
+    mseUnlockInFlightRef.current = true;
+    const wasMuted = el.muted;
+    el.muted = true;
+    (el as unknown as { srcObject: unknown }).srcObject = new MediaSourceImpl();
+
+    el.play()
+      .then(() => {
+        el.pause();
+        mseUnlockedRef.current = true;
+      })
+      .catch((error) => {
+        // Leave mseUnlockedRef false so a later gesture retries, same as the
+        // standby element's failure path.
+        console.error("Failed to unlock MSE audio element:", error);
+      })
+      .finally(() => {
+        el.muted = wasMuted;
+        mseUnlockInFlightRef.current = false;
+      });
+  }, []);
+
+  const isMseUnlocked = useCallback(() => mseUnlockedRef.current, []);
+
   /**
    * The unlock has to happen on the FIRST user gesture of the session, whatever
    * it was. Tapping a track row goes straight to `play()` and never touches
@@ -255,26 +331,31 @@ export default function MusicPlayer({
    * users with a permanently empty standby element.
    *
    * `pointerdown` in the capture phase runs before any React handler, and
-   * `unlockStandbyElement` calls `play()` synchronously inside this stack —
-   * deferring it through a promise, a timeout, or a state update would put it
-   * outside the gesture and iOS would reject it.
+   * `unlockStandbyElement`/`unlockMseElement` call `play()` synchronously
+   * inside this stack — deferring either through a promise, a timeout, or a
+   * state update would put it outside the gesture and iOS would reject it.
+   *
+   * The listener stays attached until BOTH elements report unlocked, so a
+   * gesture that only succeeds for one of them still lets a later gesture
+   * retry the other.
    */
   useEffect(() => {
     const handleFirstGesture = () => {
-      if (engine.isStandbyUnlocked()) {
+      if (engine.isStandbyUnlocked() && isMseUnlocked()) {
         document.removeEventListener("pointerdown", handleFirstGesture, true);
         return;
       }
       // Idempotent via unlockedRef/unlockInFlightRef; a failed attempt leaves
       // the listener in place so a later gesture retries.
       unlockStandbyElement();
+      unlockMseElement();
     };
 
     document.addEventListener("pointerdown", handleFirstGesture, true);
     return () => {
       document.removeEventListener("pointerdown", handleFirstGesture, true);
     };
-  }, [unlockStandbyElement, engine]);
+  }, [unlockStandbyElement, unlockMseElement, isMseUnlocked, engine]);
 
   /**
    * Pause and detach BOTH elements. The standby can be holding a fully
@@ -997,6 +1078,25 @@ export default function MusicPlayer({
       <audio
         ref={elBRef}
         loop={loopMode === "track" && activeKey === "b"}
+        preload="auto"
+        crossOrigin="anonymous"
+        playsInline
+      />
+      {/*
+        Third element, MSE-only. Never `loop` — it would loop the whole
+        shared MSE timeline rather than the current track. Only this element
+        sets `disableRemotePlayback`; ManagedMediaSource refuses to attach
+        otherwise, and this has been measured not to break AirPlay.
+        Set imperatively in the ref callback, not as a JSX attribute:
+        React's typings only declare `disableRemotePlayback` on
+        `VideoHTMLAttributes`, not `AudioHTMLAttributes`, even though the DOM
+        property exists on `HTMLMediaElement` (and therefore on <audio> too).
+      */}
+      <audio
+        ref={(el) => {
+          mseElRef.current = el;
+          if (el) el.disableRemotePlayback = true;
+        }}
         preload="auto"
         crossOrigin="anonymous"
         playsInline

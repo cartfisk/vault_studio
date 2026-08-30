@@ -28,6 +28,10 @@ import WaveformComments from "./WaveformComments";
 import { usePreferences } from "../contexts/PreferencesContext";
 import { chooseTransition, normalizeMediaUrl } from "../lib/gaplessPreload";
 import { createElementPairEngine } from "../lib/playback/elementPairEngine";
+import type {
+  PlayableTrack,
+  PlaybackEngineEvents,
+} from "../lib/playback/types";
 
 interface MusicPlayerProps {
   hideControls?: boolean;
@@ -745,8 +749,49 @@ export default function MusicPlayer({
     }
   }, [isPlaying]);
 
+  /**
+   * The engine-shaped surface the context talks to. It never reaches for a
+   * raw media element itself, so every time value it sees is track-relative
+   * by construction.
+   *
+   * `audio` is still published alongside it: the swap-order test asserts on
+   * it, and it is the element identity MusicPlayer's own transport-event
+   * bookkeeping is keyed to.
+   *
+   * `activeKey` ownership: the element-pair engine keeps a private
+   * `activeKey` used only by its formal `load()`/`prepareNext()`. Nothing
+   * calls those — `prepareNext` below routes to `prepareStandby` with the
+   * standby element this component resolves from its own React state, and
+   * the time accessors read `audioRef.current`, which the swap repoints
+   * synchronously. So MusicPlayer's React state remains the sole owner and
+   * the engine's private copy stays dead code that cannot drift.
+   */
   useEffect(() => {
-    audioPlayerRef.current = { audio: audioRef, teardown: teardownAudioElements };
+    audioPlayerRef.current = {
+      audio: audioRef,
+      teardown: teardownAudioElements,
+      kind: "elementPair" as const,
+      play: () => audioRef.current?.play() ?? Promise.resolve(),
+      pause: () => audioRef.current?.pause(),
+      getTrackTime: () => audioRef.current?.currentTime ?? 0,
+      getTrackDuration: () => audioRef.current?.duration ?? 0,
+      getPlaybackRate: () => audioRef.current?.playbackRate ?? 1,
+      seekToTrackTime: (seconds: number) => {
+        if (audioRef.current) audioRef.current.currentTime = seconds;
+      },
+      setVolume: (v: number) => {
+        if (audioRef.current) audioRef.current.volume = v;
+      },
+      canAppend: (track: PlayableTrack) => engine.canAppend(track),
+      prepareNext: (track: PlayableTrack) => {
+        engine.prepareStandby(
+          getElement(activeKey === "a" ? "b" : "a"),
+          track.url,
+          volumePercentage / 100,
+        );
+      },
+      subscribe: (events: PlaybackEngineEvents) => engine.subscribe(events),
+    };
   });
 
   const formatTime = (seconds: number) => {

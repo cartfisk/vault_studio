@@ -42,6 +42,19 @@ export interface PlaybackEngineEvents {
 	error?: (err: unknown) => void;
 }
 
+/** A track as handed to an engine.
+ *
+ *  `url` is always present — it is what the element-pair engine plays and
+ *  what any engine falls back to. `manifest` is present only when the server
+ *  offered a lossless rendition this browser can play, which is the sole
+ *  input to whether the MSE engine can take the track. */
+export interface PlayableTrack {
+	trackId: string;
+	versionId: number | null;
+	url: string;
+	manifest?: GaplessManifest | null;
+}
+
 /**
  * The shared contract implemented by every playback engine (MSE, and later
  * an element-pair engine for mixed/lossy queues).
@@ -51,15 +64,15 @@ export interface PlaybackEngineEvents {
  * without leaking implementation details into callers.
  */
 export interface PlaybackEngine {
-	load(trackId: string, versionId: number | null, manifest: GaplessManifest): Promise<void>;
+	load(track: PlayableTrack): Promise<void>;
 	play(): Promise<void>;
 	pause(): void;
 	seekToTrackTime(seconds: number): void;
 	getTrackTime(): number;
 	getTrackDuration(): number;
 	setVolume(v: number): void;
-	canAppend(manifest: GaplessManifest | null): boolean;
-	prepareNext(trackId: string, versionId: number | null, manifest: GaplessManifest): Promise<void>;
+	canAppend(track: PlayableTrack): boolean;
+	prepareNext(track: PlayableTrack): Promise<void>;
 	teardown(): void;
 	subscribe(events: PlaybackEngineEvents): () => void;
 }

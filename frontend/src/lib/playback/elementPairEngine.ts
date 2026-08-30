@@ -1,5 +1,5 @@
 import { SILENT_AUDIO_DATA_URI, normalizeMediaUrl } from "@/lib/gaplessPreload";
-import type { GaplessManifest, PlaybackEngine, PlaybackEngineEvents } from "@/lib/playback/types";
+import type { PlayableTrack, PlaybackEngine, PlaybackEngineEvents } from "@/lib/playback/types";
 
 /**
  * Two <audio> elements ping-ponging, one per track, swapped at the boundary.
@@ -31,14 +31,21 @@ export interface LoadFreshOptions {
 }
 
 /**
- * The element-pair engine, plus the low-level entry points MusicPlayer.tsx
- * calls directly today while it still owns the swap-vs-load decision
- * (`chooseTransition`) and the `activeKey` React state that decision reads.
- * These take the active/standby elements explicitly instead of relying on
- * the engine's own internal notion of "active", so they cannot drift out of
- * sync with MusicPlayer's bookkeeping. The formal PlaybackEngine methods
- * (`load`, `prepareNext`, ...) use the engine's own internal active/standby
- * tracking and are for the orchestrator introduced in a later task.
+ * The formal `PlaybackEngine.load`/`prepareNext` are real, usable
+ * implementations: they read `track.url` and ignore `track.manifest`
+ * entirely, since a plain `<audio>` element has no use for it. They share
+ * their mechanics (`swapTo`/`loadFresh`/`prepareStandby` below) with the
+ * low-level entry points MusicPlayer.tsx calls directly today, rather than
+ * duplicating the logic.
+ *
+ * The low-level methods exist because MusicPlayer.tsx, not this engine,
+ * still owns the swap-vs-load decision (`chooseTransition`) and the
+ * `activeKey` React state that decision reads — they take the active/standby
+ * elements explicitly instead of relying on the engine's own internal
+ * notion of "active", so they cannot drift out of sync with MusicPlayer's
+ * bookkeeping. `load`/`prepareNext` use the engine's own internal
+ * active/standby tracking instead, for the orchestrator introduced in a
+ * later task once it takes over that decision and that state.
  */
 export interface ElementPairEngine extends PlaybackEngine {
 	/**
@@ -148,7 +155,7 @@ export function createElementPairEngine(deps: ElementPairEngineDeps): ElementPai
 			});
 	}
 
-	function performPrepareStandby(standby: HTMLAudioElement | null, url: string, volume: number): void {
+	function prepareStandby(standby: HTMLAudioElement | null, url: string, volume: number): void {
 		if (!standby) return;
 		if (
 			normalizeMediaUrl(standby.src, window.location.href) ===
@@ -161,11 +168,7 @@ export function createElementPairEngine(deps: ElementPairEngineDeps): ElementPai
 		standby.load();
 	}
 
-	function prepareStandby(standby: HTMLAudioElement | null, url: string, volume: number): void {
-		performPrepareStandby(standby, url, volume);
-	}
-
-	function performSwap(active: HTMLAudioElement, standby: HTMLAudioElement, opts: SwapOptions): void {
+	function swapTo(active: HTMLAudioElement, standby: HTMLAudioElement, opts: SwapOptions): void {
 		// Tear the outgoing element down BEFORE starting the incoming one.
 		// A half-finished swap plays two tracks at once, which is worse than a gap.
 		active.pause();
@@ -192,11 +195,7 @@ export function createElementPairEngine(deps: ElementPairEngineDeps): ElementPai
 		}
 	}
 
-	function swapTo(active: HTMLAudioElement, standby: HTMLAudioElement, opts: SwapOptions): void {
-		performSwap(active, standby, opts);
-	}
-
-	function performLoadFresh(active: HTMLAudioElement, url: string, opts: LoadFreshOptions): () => void {
+	function loadFresh(active: HTMLAudioElement, url: string, opts: LoadFreshOptions): () => void {
 		active.src = url;
 		active.volume = opts.volume;
 		active.load();
@@ -229,11 +228,7 @@ export function createElementPairEngine(deps: ElementPairEngineDeps): ElementPai
 		return () => {};
 	}
 
-	function loadFresh(active: HTMLAudioElement, url: string, opts: LoadFreshOptions): () => void {
-		return performLoadFresh(active, url, opts);
-	}
-
-	function canAppend(): boolean {
+	function canAppend(_track: PlayableTrack): boolean {
 		// Every track change is a swap; this engine is never gapless.
 		return false;
 	}
@@ -264,37 +259,37 @@ export function createElementPairEngine(deps: ElementPairEngineDeps): ElementPai
 		getActive()?.pause();
 	}
 
-	async function load(trackId: string, _versionId: number | null, manifest: GaplessManifest): Promise<void> {
+	async function load(track: PlayableTrack): Promise<void> {
 		const active = getActive();
 		const standby = getStandby();
 		if (!active) return;
 
-		const targetUrl = normalizeMediaUrl(manifest.url, window.location.href);
+		const targetUrl = normalizeMediaUrl(track.url, window.location.href);
 		if (
 			standby &&
 			normalizeMediaUrl(standby.src, window.location.href) === targetUrl &&
 			standby.readyState >= 3
 		) {
-			performSwap(active, standby, {
+			swapTo(active, standby, {
 				volume: active.volume,
 				isPlaying: !active.paused,
 				onDurationKnown: () => {},
 				onPlayingChange: () => {},
 			});
 			activeKey = activeKey === "a" ? "b" : "a";
-			emit("trackchange", trackId);
+			emit("trackchange", track.trackId);
 			return;
 		}
 
-		performLoadFresh(active, manifest.url, {
+		loadFresh(active, track.url, {
 			volume: active.volume,
 			isPlaying: false,
 			onPlayError: (error) => emit("error", error),
 		});
 	}
 
-	async function prepareNext(_trackId: string, _versionId: number | null, manifest: GaplessManifest): Promise<void> {
-		performPrepareStandby(getStandby(), manifest.url, getActive()?.volume ?? 1);
+	async function prepareNext(track: PlayableTrack): Promise<void> {
+		prepareStandby(getStandby(), track.url, getActive()?.volume ?? 1);
 	}
 
 	function teardown(): void {

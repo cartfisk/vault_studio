@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { LEAD_SECONDS, createMseEngine } from "@/lib/playback/mseEngine";
-import type { FragmentRange, GaplessManifest } from "@/lib/playback/types";
+import type { FragmentRange, GaplessManifest, PlayableTrack } from "@/lib/playback/types";
 
 /**
  * jsdom's <audio> element does not implement `srcObject`, so the fake
@@ -128,6 +128,15 @@ function manifest(overrides: Partial<GaplessManifest> = {}): GaplessManifest {
 	};
 }
 
+function playableTrack(
+	trackId: string,
+	versionId: number | null,
+	overrides: Partial<GaplessManifest> = {},
+): PlayableTrack {
+	const m = manifest(overrides);
+	return { trackId, versionId, url: m.url, manifest: m };
+}
+
 /**
  * Wait until `observe()` stops changing between ticks, instead of assuming
  * a fixed number of ticks is enough. A fixed-tick flush can silently freeze
@@ -182,7 +191,7 @@ describe("createMseEngine", () => {
 		// fragments). With backpressure it must stop well short of that.
 		const { fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
 
-		await engine.load("a", 1, manifest({ fragments: Array.from({ length: 10 }, (_, i) => ({ start: i, end: i })) }));
+		await engine.load(playableTrack("a", 1, { fragments: Array.from({ length: 10 }, (_, i) => ({ start: i, end: i })) }));
 		await flushUntilQuiescent(() => fetchRange.mock.calls.length);
 
 		expect(fetchRange.mock.calls.length).toBeGreaterThan(0);
@@ -201,8 +210,8 @@ describe("createMseEngine", () => {
 		// cannot tell a working init-append guard from a missing one.
 		const { fetchRange, engine } = makeEngine({ secondsPerAppend: 20 });
 
-		await engine.load("a", 1, manifest({ fragments: [{ start: 0, end: 0 }] }));
-		await engine.prepareNext("b", 2, manifest({ fragments: [{ start: 0, end: 0 }] }));
+		await engine.load(playableTrack("a", 1, { fragments: [{ start: 0, end: 0 }] }));
+		await engine.prepareNext(playableTrack("b", 2, { fragments: [{ start: 0, end: 0 }] }));
 		await flushUntilQuiescent(() => fetchRange.mock.calls.length);
 
 		// init(a)=20s, frag0(a)=40s -> bufferedAhead is 40, over the 30s
@@ -213,7 +222,7 @@ describe("createMseEngine", () => {
 	it("evicts buffered data behind currentTime - LEAD_SECONDS, and never ahead of currentTime", async () => {
 		const { element, engine, fetchRange } = makeEngine({ secondsPerAppend: 10 });
 
-		await engine.load("a", 1, manifest());
+		await engine.load(playableTrack("a", 1));
 		await flushUntilQuiescent(() => fetchRange.mock.calls.length);
 
 		// currentTime pinned at 0 so far: nothing should have been evicted
@@ -237,7 +246,7 @@ describe("createMseEngine", () => {
 		const { fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
 		const m = manifest({ initByteEnd: 710 });
 
-		await engine.load("a", 1, m);
+		await engine.load({ trackId: "a", versionId: 1, url: m.url, manifest: m });
 		await flushUntilQuiescent(() => fetchRange.mock.calls.length);
 
 		const initCalls = fetchRange.mock.calls.filter(([, start, end]) => start === 0 && end === 710);
@@ -248,7 +257,7 @@ describe("createMseEngine", () => {
 	it("settles a loop waiting on timeupdate when teardown() is called, instead of hanging", async () => {
 		const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
 
-		await engine.load("a", 1, manifest());
+		await engine.load(playableTrack("a", 1));
 		await flushUntilQuiescent(() => fetchRange.mock.calls.length);
 
 		// The loop should now be blocked on a pending `timeupdate` wait, plus
@@ -270,8 +279,8 @@ describe("createMseEngine", () => {
 		const { element, engine } = makeEngine({ secondsPerAppend: 10 });
 
 		// Track "a" is exactly 1 second (44100 samples @ 44100Hz).
-		await engine.load("a", 1, manifest({ sampleCount: 44100, sampleRate: 44100 }));
-		await engine.prepareNext("b", 2, manifest({ sampleCount: 44100, sampleRate: 44100 }));
+		await engine.load(playableTrack("a", 1, { sampleCount: 44100, sampleRate: 44100 }));
+		await engine.prepareNext(playableTrack("b", 2, { sampleCount: 44100, sampleRate: 44100 }));
 
 		element.currentTime = 1.25; // 0.25s into track "b"
 
@@ -287,7 +296,7 @@ describe("createMseEngine", () => {
 		const onError = vi.fn();
 		engine.subscribe({ error: onError });
 
-		await engine.load("a", 1, manifest());
+		await engine.load(playableTrack("a", 1));
 		await flushUntilQuiescent(() => onError.mock.calls.length);
 
 		expect(onError).toHaveBeenCalledTimes(1);

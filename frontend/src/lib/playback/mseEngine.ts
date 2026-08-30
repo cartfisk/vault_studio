@@ -4,6 +4,7 @@ import type {
 	FragmentRange,
 	GaplessManifest,
 	PlacedTrack,
+	PlayableTrack,
 	PlaybackEngine,
 	PlaybackEngineEvents,
 } from "@/lib/playback/types";
@@ -264,11 +265,15 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 		}
 	}
 
-	async function load(
-		trackId: string,
-		versionId: number | null,
-		manifest: GaplessManifest,
-	): Promise<void> {
+	async function load(track: PlayableTrack): Promise<void> {
+		const { trackId, versionId, manifest } = track;
+		if (!manifest) {
+			// selectEngine decides which engine gets a track upstream, based on
+			// exactly this same manifest presence — a caller reaching this
+			// engine without one is a programming error, not a runtime state.
+			throw new Error("createMseEngine: load() requires track.manifest");
+		}
+
 		stop(currentStop);
 		placed = [];
 		jobs = [];
@@ -281,25 +286,29 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 		currentStop = token;
 
 		await attach(manifest, token);
-		const track = placeTrack(placed, trackId, versionId, manifest);
-		placed.push(track);
-		enqueueJob(track, manifest);
+		const placedTrack = placeTrack(placed, trackId, versionId, manifest);
+		placed.push(placedTrack);
+		enqueueJob(placedTrack, manifest);
 		void runLoop(token);
 	}
 
-	async function prepareNext(
-		trackId: string,
-		versionId: number | null,
-		manifest: GaplessManifest,
-	): Promise<void> {
+	async function prepareNext(track: PlayableTrack): Promise<void> {
+		const { manifest } = track;
+		if (!manifest) {
+			// See load(): selectEngine already decided this engine only sees
+			// tracks with a manifest.
+			throw new Error("createMseEngine: prepareNext() requires track.manifest");
+		}
+
 		if (!mediaSource) throw new Error("createMseEngine: call load() before prepareNext()");
-		const track = placeTrack(placed, trackId, versionId, manifest);
-		placed.push(track);
-		enqueueJob(track, manifest);
+		const placedTrack = placeTrack(placed, track.trackId, track.versionId, manifest);
+		placed.push(placedTrack);
+		enqueueJob(placedTrack, manifest);
 		void runLoop(currentStop);
 	}
 
-	function canAppend(manifest: GaplessManifest | null): boolean {
+	function canAppend(track: PlayableTrack): boolean {
+		const manifest = track.manifest;
 		if (!manifest) return false;
 		if (!sourceBufferMime) return true;
 		return LOSSLESS_MIME[manifest.codec] === sourceBufferMime;

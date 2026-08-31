@@ -134,6 +134,47 @@ func TestStreamURLOmitsGaplessForLossyQuality(t *testing.T) {
 	}
 }
 
+// A user whose quality preference is "source" must still get gapless.
+//
+// The client's quality control is a two-way toggle between "source" and
+// "lossy" -- "lossless" is accepted by the API but unreachable from the UI --
+// so gating the manifest on "lossless" alone made the feature unreachable for
+// every user. "source" implies lossless here by construction: segment sets are
+// only ever built when the source codec is lossless, so a completed set
+// existing is itself proof the source was lossless.
+func TestStreamURLOffersGaplessForSourceQuality(t *testing.T) {
+	database := testutil.NewDB(t)
+	owner := int64(1)
+	trackPublicID, versionID := testutil.SeedTrackForUser(t, database, owner)
+
+	path := filepath.Join(t.TempDir(), "a.mp4")
+	if err := os.WriteFile(path, []byte("alac-fragment-bytes"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	testutil.SeedCompletedSegmentSet(t, database, versionID, "alac", path)
+	testutil.SetUserQuality(t, database, owner, "source")
+
+	h := handlers.NewMediaHandler(testAuthConfig(), database)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/media/stream/"+trackPublicID+"?codecs=alac,flac", nil)
+	req.SetPathValue("id", trackPublicID)
+	req = withUser(req, owner)
+
+	rec := httptest.NewRecorder()
+	if err := h.StreamURL(rec, req); err != nil {
+		t.Fatalf("StreamURL() error = %v", err)
+	}
+
+	payload := decodeResultObject(t, rec)
+	gapless, ok := payload["gapless"].(map[string]any)
+	if !ok {
+		t.Fatalf("response = %v, want a gapless manifest for source quality", payload)
+	}
+	if gapless["codec"] != "alac" {
+		t.Errorf("codec = %v, want alac", gapless["codec"])
+	}
+}
+
 func TestStreamURLPrefersClientCodecOrder(t *testing.T) {
 	database := testutil.NewDB(t)
 	owner := int64(1)

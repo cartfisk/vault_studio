@@ -133,8 +133,17 @@ func (h *MediaHandler) gaplessManifest(r *http.Request, trackID, requestedQualit
 		return nil
 	}
 
+	// Gapless is offered for both lossless tiers. "source" counts because it
+	// implies lossless here by construction: TranscodeVersion only builds
+	// segment sets when IsLosslessCodec(sourceCodec) is true, so a completed
+	// set existing is itself proof the source was lossless. A lossy upload
+	// never gets a set, so it can never reach this branch.
+	//
+	// Excluding "source" made the feature unreachable for every user: the
+	// client's quality control is a two-way toggle between "source" and
+	// "lossy", and never offers "lossless" at all.
 	quality := resolveQuality(ctx, h.db, int64(userID), track.ID, requestedQuality)
-	if quality != "lossless" {
+	if quality != "lossless" && quality != "source" {
 		return nil
 	}
 

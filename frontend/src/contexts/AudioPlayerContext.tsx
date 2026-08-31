@@ -107,6 +107,13 @@ interface AudioPlayerContextType {
   currentProjectTracks: Track[];
   shuffledProjectTracks: Track[];
   audioUrl: string | null;
+  /**
+   * The current track as an engine sees it: the same `audioUrl` plus the
+   * manifest that decides whether it can play losslessly. Published so
+   * MusicPlayer can route the track to the MSE engine without re-signing or
+   * re-deriving anything. Null before the first track is minted.
+   */
+  currentPlayable: PlayableTrack | null;
   nextTrackPreload: NextTrackPreload | null;
   play: (
     track: Track,
@@ -159,6 +166,8 @@ export function AudioPlayerProvider({
   const [duration, setDuration] = useState(0);
   const [previewProgress, setPreviewProgress] = useState(0);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [currentPlayable, setCurrentPlayable] =
+    useState<PlayableTrack | null>(null);
   const [nextTrackPreload, setNextTrackPreload] =
     useState<NextTrackPreload | null>(null);
   /**
@@ -435,6 +444,12 @@ export function AudioPlayerProvider({
         supported: supportedLosslessCodecs(),
       });
 
+      setCurrentPlayable({
+        trackId: trackToPlay.id,
+        versionId: trackToPlay.versionId ?? null,
+        url: streamUrl,
+        manifest,
+      });
       setAudioUrl(streamUrl);
       setIsPlaying(autoPlay);
     },
@@ -455,6 +470,7 @@ export function AudioPlayerProvider({
     setIsPlaying(false);
     setCurrentTrack(null);
     setAudioUrl(null);
+    setCurrentPlayable(null);
     setDuration(0);
     setPreviewProgress(0);
     const engine = getEngine();
@@ -1144,6 +1160,7 @@ export function AudioPlayerProvider({
 
       setCurrentTrack(null);
       setAudioUrl(null);
+      setCurrentPlayable(null);
       setNextTrackPreload(null);
       preloadKeyRef.current = null;
       setDuration(0);
@@ -1176,6 +1193,7 @@ export function AudioPlayerProvider({
         currentProjectTracks,
         shuffledProjectTracks,
         audioUrl,
+        currentPlayable,
         nextTrackPreload,
         play,
         pause,

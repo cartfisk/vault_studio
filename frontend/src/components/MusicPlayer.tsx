@@ -28,8 +28,16 @@ import WaveformComments from "./WaveformComments";
 import { usePreferences } from "../contexts/PreferencesContext";
 import { chooseTransition, normalizeMediaUrl } from "../lib/gaplessPreload";
 import { createElementPairEngine } from "../lib/playback/elementPairEngine";
+import { createMseEngine } from "../lib/playback/mseEngine";
+import { fetchRange } from "../lib/playback/fetchRange";
+import { supportedLosslessCodecs } from "../lib/playback/codecSupport";
+import {
+  selectEngine,
+  type EngineKind,
+} from "../lib/playback/selectEngine";
 import type {
   PlayableTrack,
+  PlaybackEngine,
   PlaybackEngineEvents,
 } from "../lib/playback/types";
 
@@ -47,6 +55,7 @@ export default function MusicPlayer({
   const {
     currentTrack,
     audioUrl,
+    currentPlayable,
     nextTrackPreload,
     isPlaying,
     pause,
@@ -161,18 +170,184 @@ export default function MusicPlayer({
   }
   const engine = engineRef.current;
 
+  /**
+   * The MSE engine, built lazily on the first lossless track. Lazy rather
+   * than eager because constructing it registers listeners on the MSE
+   * element, and that element is not mounted until the player renders.
+   *
+   * `teardown()` on this engine is terminal — it removes the element
+   * listeners it registered at construction — so every teardown also drops
+   * the reference and the next lossless track builds a fresh engine.
+   */
+  const mseEngineRef = useRef<PlaybackEngine | null>(null);
+  /**
+   * The track id the MSE engine last reported CROSSING INTO. A gapless
+   * boundary publishes a new `currentPlayable` for a track that is already
+   * playing off the existing timeline; reloading for it would tear down the
+   * very timeline producing audio and create the seam this exists to remove.
+   *
+   * Keyed on the crossing, not on "is it appended": the user can also skip
+   * forward to an appended track by hand, and that one DOES need a real load
+   * because the playhead is still back on the previous track.
+   */
+  const mseBoundaryTrackIdRef = useRef<string | null>(null);
+  /**
+   * Set once the MSE path has failed at runtime. Latches for the rest of the
+   * session and forces every track back onto the element pair, which always
+   * has a plain playable `audioUrl` for the same track. A seam is today's
+   * behaviour; silence is not.
+   */
+  const [mseDisabled, setMseDisabled] = useState(false);
+
+  const dropMseEngine = useCallback(() => {
+    // Pause before detaching. `mseEngine.teardown()` clears `srcObject`,
+    // which should stop playback on its own, but the teardown-before-play
+    // rule is not worth leaving to an implicit media-element side effect.
+    mseElRef.current?.pause();
+    mseEngineRef.current?.teardown();
+    mseEngineRef.current = null;
+    mseBoundaryTrackIdRef.current = null;
+  }, []);
+
+  const onEndedRef = useRef(onEnded);
+  onEndedRef.current = onEnded;
+
+  const getMseEngine = useCallback((): PlaybackEngine | null => {
+    if (mseEngineRef.current) return mseEngineRef.current;
+    const el = mseElRef.current;
+    if (!el) return null;
+    const w = window as unknown as {
+      ManagedMediaSource?: typeof MediaSource;
+      MediaSource?: typeof MediaSource;
+    };
+    const mediaSourceImpl = w.ManagedMediaSource ?? w.MediaSource;
+    if (!mediaSourceImpl) return null;
+    const created = createMseEngine({
+      element: el,
+      mediaSourceImpl,
+      fetchRange,
+    });
+    created.subscribe({
+      /**
+       * The whole point of a gapless boundary is that no `ended` fires, so
+       * this is the ONLY signal that the previous track finished. It is
+       * routed into the same `onEnded` the element pair uses, which does the
+       * full advance — queue shift, `currentTrack`, waveform, MediaSession
+       * metadata — rather than a partial one that would leave the in-app UI
+       * and the lock screen showing the track that just finished.
+       *
+       * The advance re-publishes a `currentPlayable` for a track already on
+       * this timeline; the load effect below recognises that and does not
+       * reload, so no audio is disturbed.
+       *
+       * `mseEngine` never emits this for the track it was loaded with, only
+       * on a real crossing, so there is no spurious advance at load.
+       */
+      trackchange: (trackId: string) => {
+        mseBoundaryTrackIdRef.current = trackId;
+        onEndedRef.current();
+      },
+      error: (err) => {
+        console.error(
+          "[MusicPlayer] MSE engine error; falling back to the element pair:",
+          err,
+        );
+        dropMseEngine();
+        setMseDisabled(true);
+      },
+    });
+    mseEngineRef.current = created;
+    return created;
+  }, [dropMseEngine]);
+
+  /**
+   * Which engine THIS track belongs on, decided during render so the
+   * element-pair effects can gate on it synchronously rather than racing a
+   * state update.
+   *
+   * `supportedLosslessCodecs()` already returns [] when the browser has no
+   * MediaSource implementation at all, so `selectEngine` falls back to the
+   * element pair for those browsers without a separate check.
+   */
+  const desiredEngine: EngineKind = useMemo(() => {
+    if (mseDisabled) return "elementPair";
+    if (!currentPlayable) return "elementPair";
+    return selectEngine({
+      manifest: currentPlayable.manifest,
+      supported: supportedLosslessCodecs(),
+    });
+  }, [mseDisabled, currentPlayable]);
+
+  // Mirrored into a ref so the time accessors below stay stable across
+  // renders and can be listed in effect dependency arrays without churn.
+  const engineKindRef = useRef<EngineKind>("elementPair");
+  engineKindRef.current = desiredEngine;
+
+  /**
+   * The engine whose timeline is authoritative right now, or null when the
+   * element pair is playing — that engine's timeline IS the element's, so
+   * every raw element read is already track-relative and correct.
+   */
+  const activeTimelineEngine = useCallback((): PlaybackEngine | null => {
+    if (engineKindRef.current !== "mse") return null;
+    return mseEngineRef.current;
+  }, []);
+
+  /** TRACK-relative playhead. Under MSE the element's `currentTime` is an
+   *  offset into a shared timeline and is silently wrong here. */
+  const readTrackTime = useCallback((): number => {
+    const mse = activeTimelineEngine();
+    if (mse) return mse.getTrackTime();
+    return audioRef.current?.currentTime ?? 0;
+  }, [activeTimelineEngine]);
+
+  /** TRACK-relative duration. Under MSE the element's `duration` is the
+   *  whole timeline's and GROWS as tracks are appended. */
+  const readTrackDuration = useCallback((): number => {
+    const mse = activeTimelineEngine();
+    if (mse) return mse.getTrackDuration();
+    return audioRef.current?.duration ?? 0;
+  }, [activeTimelineEngine]);
+
+  const seekTrackTime = useCallback(
+    (seconds: number) => {
+      const mse = activeTimelineEngine();
+      if (mse) {
+        mse.seekToTrackTime(seconds);
+        return;
+      }
+      if (audioRef.current) audioRef.current.currentTime = seconds;
+    },
+    [activeTimelineEngine],
+  );
+
+  // Latest-value mirrors, so the MSE load effect can read them without
+  // listing them as dependencies and reloading the timeline on every volume
+  // nudge or play/pause.
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+  const volumeRef = useRef(volumePercentage);
+  volumeRef.current = volumePercentage;
+
   // Must run before any effect that reads audioRef.current.
   // No dependency array: the <audio> pair is not mounted on the first render
   // (the component returns null until there is a track or a queue), so an
   // effect keyed on [activeKey] would latch audioRef.current to null and never
   // re-run once the elements actually attach.
   useEffect(() => {
-    audioRef.current = getElement(activeKey);
+    audioRef.current =
+      desiredEngine === "mse" ? mseElRef.current : getElement(activeKey);
   });
 
   // Buffer the next track into whichever element is not currently playing.
   useEffect(() => {
     if (!nextTrackPreload) return;
+    // A preload bound for the MSE engine is either already appended to its
+    // timeline or is a deliberate handoff that will load through the MSE
+    // path. Buffering it into the standby element as well downloads it a
+    // second time and leaves a second source primed with the same audio —
+    // one `play()` away from two tracks being audible at once.
+    if (nextTrackPreload.engine === "mse") return;
     const standby = getElement(activeKey === "a" ? "b" : "a");
     engine.prepareStandby(standby, nextTrackPreload.url, volumePercentage / 100);
   }, [nextTrackPreload, activeKey, getElement, volumePercentage, engine]);
@@ -591,19 +766,38 @@ export default function MusicPlayer({
       if (isStale()) return;
       onPlayingChange(false);
     };
-    const handleEnded = () => onEnded();
+    const handleEnded = () => {
+      // The MSE element deliberately carries no `loop` attribute — looping it
+      // would loop the whole shared timeline rather than the current track.
+      // Under loop-track the timeline holds exactly one track (the preload
+      // trigger never appends in that mode), so restarting it is the faithful
+      // equivalent of the attribute the element pair uses.
+      if (engineKindRef.current === "mse" && loopMode === "track") {
+        seekTrackTime(0);
+        void audio.play().catch((error) => {
+          console.error("Failed to restart looped track:", error);
+        });
+        return;
+      }
+      onEnded();
+    };
     const handleLoadedMetadata = () => {
-      setDuration(audio.duration);
-      onDurationChange(audio.duration);
+      // TRACK-relative: under MSE `audio.duration` is the shared timeline's
+      // and grows with every appended track.
+      const trackDuration = readTrackDuration();
+      setDuration(trackDuration);
+      onDurationChange(trackDuration);
     };
 
     // Handle timeupdate for iOS Safari compatibility
     const handleTimeUpdate = () => {
-      if (!Number.isNaN(audio.currentTime)) {
-        const actualTime = audio.currentTime;
+      const trackTime = readTrackTime();
+      if (!Number.isNaN(trackTime)) {
+        const actualTime = trackTime;
+        const trackDuration = readTrackDuration();
         const audioDuration =
-          !Number.isNaN(audio.duration) && audio.duration > 0
-            ? audio.duration
+          !Number.isNaN(trackDuration) && trackDuration > 0
+            ? trackDuration
             : 0;
 
         const clampedTime = Math.min(actualTime, audioDuration);
@@ -628,7 +822,18 @@ export default function MusicPlayer({
       audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
       audio.removeEventListener("timeupdate", handleTimeUpdate);
     };
-  }, [onPlayingChange, onEnded, onDurationChange, isDragging, activeKey]);
+  }, [
+    onPlayingChange,
+    onEnded,
+    onDurationChange,
+    isDragging,
+    activeKey,
+    desiredEngine,
+    loopMode,
+    readTrackTime,
+    readTrackDuration,
+    seekTrackTime,
+  ]);
 
   useEffect(() => {
     const updateTime = () => {
@@ -637,15 +842,19 @@ export default function MusicPlayer({
         return;
       }
 
-      const a = audioRef.current;
+      // TRACK-relative on both engines: on the element pair these resolve to
+      // the active element's own values, under MSE to the engine's offset
+      // arithmetic.
+      const trackDuration = readTrackDuration();
       const audioDuration =
-        !Number.isNaN(a.duration) && a.duration > 0 ? a.duration : 0;
+        !Number.isNaN(trackDuration) && trackDuration > 0 ? trackDuration : 0;
 
       if (pendingSeekPositionRef.current !== null) {
         const preview = Math.min(pendingSeekPositionRef.current, audioDuration);
         setPreviewProgress(preview);
       } else if (!isDragging) {
-        const actualTime = !Number.isNaN(a.currentTime) ? a.currentTime : 0;
+        const trackTime = readTrackTime();
+        const actualTime = !Number.isNaN(trackTime) ? trackTime : 0;
         const clampedTime = Math.min(actualTime, audioDuration);
         setPreviewProgress(clampedTime);
       }
@@ -661,7 +870,7 @@ export default function MusicPlayer({
         rafIdRef.current = null;
       }
     };
-  }, [isDragging]);
+  }, [isDragging, readTrackTime, readTrackDuration]);
 
   useEffect(() => {
     onProgressUpdate(previewProgress);
@@ -669,8 +878,90 @@ export default function MusicPlayer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewProgress]);
 
+  /**
+   * Load lossless tracks into the MSE engine.
+   *
+   * Declared BEFORE the element-pair `audioUrl` effect on purpose: when
+   * `desiredEngine` flips back to the element pair (a lossless -> lossy
+   * boundary, or an MSE failure) both effects re-run, and effects run in
+   * declaration order. Tearing the MSE timeline down here first is what
+   * guarantees the element pair never starts while the MSE element is still
+   * producing audio.
+   */
+  useEffect(() => {
+    if (desiredEngine !== "mse") {
+      if (mseEngineRef.current) dropMseEngine();
+      return;
+    }
+    if (!currentPlayable) return;
+
+    // The engine already crossed into this track — a gapless boundary, not a
+    // new load. Reloading would tear down the timeline that is playing.
+    if (mseBoundaryTrackIdRef.current === currentPlayable.trackId) {
+      const boundaryDuration = mseEngineRef.current?.getTrackDuration() ?? 0;
+      if (Number.isFinite(boundaryDuration) && boundaryDuration > 0) {
+        setDuration(boundaryDuration);
+        onDurationChange(boundaryDuration);
+      }
+      return;
+    }
+
+    const mse = getMseEngine();
+    if (!mse) {
+      // No MediaSource implementation, or the element is not mounted yet.
+      // Latch back to the element pair rather than leaving this track with
+      // no engine at all.
+      setMseDisabled(true);
+      return;
+    }
+
+    // Teardown before play, same rule the element-pair swap follows: the
+    // outgoing source is silenced and detached before the incoming one is
+    // told to start.
+    engine.teardown();
+
+    let cancelled = false;
+    mseBoundaryTrackIdRef.current = null;
+
+    void mse
+      .load(currentPlayable)
+      .then(() => {
+        if (cancelled) return;
+        mse.setVolume(volumeRef.current / 100);
+        const loaded = mse.getTrackDuration();
+        if (Number.isFinite(loaded) && loaded > 0) {
+          setDuration(loaded);
+          onDurationChange(loaded);
+        }
+        if (isPlayingRef.current) return mse.play();
+      })
+      .catch((error) => {
+        console.error(
+          "[MusicPlayer] MSE load failed; falling back to the element pair:",
+          error,
+        );
+        if (cancelled) return;
+        dropMseEngine();
+        setMseDisabled(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    desiredEngine,
+    currentPlayable,
+    getMseEngine,
+    dropMseEngine,
+    engine,
+    onDurationChange,
+  ]);
+
   useEffect(() => {
     if (!audioUrl) return;
+    // The MSE engine owns this track. Touching the element pair here would
+    // start a second source alongside it.
+    if (desiredEngine === "mse") return;
 
     const active = getElement(activeKey);
     const standby = getElement(activeKey === "a" ? "b" : "a");
@@ -729,6 +1020,7 @@ export default function MusicPlayer({
     onPlayingChange,
     onDurationChange,
     engine,
+    desiredEngine,
   ]);
 
   useEffect(() => {
@@ -769,28 +1061,57 @@ export default function MusicPlayer({
   useEffect(() => {
     audioPlayerRef.current = {
       audio: audioRef,
-      teardown: teardownAudioElements,
-      kind: "elementPair" as const,
+      // Tears down BOTH engines. Logout has to silence whichever one is
+      // live and any buffer the other is still holding.
+      teardown: () => {
+        dropMseEngine();
+        teardownAudioElements();
+      },
+      kind: desiredEngine,
+      // `audioRef` points at the MSE element while that engine is active, so
+      // transport verbs need no branch — the element IS the engine's element.
       play: () => audioRef.current?.play() ?? Promise.resolve(),
       pause: () => audioRef.current?.pause(),
-      getTrackTime: () => audioRef.current?.currentTime ?? 0,
-      getTrackDuration: () => audioRef.current?.duration ?? 0,
+      // Time and duration DO need a branch. On the element pair the raw
+      // element reads below are already track-relative and correct; under MSE
+      // they are offsets into a shared timeline and the engine's own
+      // accessors are the only correct source.
+      getTrackTime: () =>
+        activeTimelineEngine()?.getTrackTime() ??
+        (audioRef.current?.currentTime ?? 0),
+      getTrackDuration: () =>
+        activeTimelineEngine()?.getTrackDuration() ??
+        (audioRef.current?.duration ?? 0),
       getPlaybackRate: () => audioRef.current?.playbackRate ?? 1,
       seekToTrackTime: (seconds: number) => {
+        const mse = activeTimelineEngine();
+        if (mse) {
+          mse.seekToTrackTime(seconds);
+          return;
+        }
         if (audioRef.current) audioRef.current.currentTime = seconds;
       },
       setVolume: (v: number) => {
         if (audioRef.current) audioRef.current.volume = v;
       },
-      canAppend: (track: PlayableTrack) => engine.canAppend(track),
-      prepareNext: (track: PlayableTrack) => {
+      canAppend: (track: PlayableTrack) => {
+        const mse = activeTimelineEngine();
+        return mse ? mse.canAppend(track) : engine.canAppend(track);
+      },
+      prepareNext: async (track: PlayableTrack) => {
+        const mse = activeTimelineEngine();
+        if (mse) {
+          await mse.prepareNext(track);
+          return;
+        }
         engine.prepareStandby(
           getElement(activeKey === "a" ? "b" : "a"),
           track.url,
           volumePercentage / 100,
         );
       },
-      subscribe: (events: PlaybackEngineEvents) => engine.subscribe(events),
+      subscribe: (events: PlaybackEngineEvents) =>
+        (activeTimelineEngine() ?? engine).subscribe(events),
     };
   });
 
@@ -873,9 +1194,7 @@ export default function MusicPlayer({
       event.preventDefault();
       const delta = event.key === "ArrowLeft" ? -5 : 5;
       const newTime = Math.max(0, Math.min(previewProgress + delta, duration));
-      if (audioRef.current) {
-        audioRef.current.currentTime = newTime;
-      }
+      seekTrackTime(newTime);
       pendingSeekPositionRef.current = null;
     }
   };
@@ -885,11 +1204,11 @@ export default function MusicPlayer({
       if (!audioRef.current) return;
       const newTime = Math.max(
         0,
-        Math.min(audioRef.current.currentTime + seconds, duration),
+        Math.min(readTrackTime() + seconds, duration),
       );
-      audioRef.current.currentTime = newTime;
+      seekTrackTime(newTime);
     },
-    [duration],
+    [duration, readTrackTime, seekTrackTime],
   );
 
   const updateVolumeSeekFromThumbPosition = useCallback(() => {
@@ -1048,7 +1367,7 @@ export default function MusicPlayer({
           Math.min(100, (x / rect.width) * 100),
         );
         const seekTime = (clickPercentage / 100) * duration;
-        audioRef.current.currentTime = seekTime;
+        seekTrackTime(seekTime);
         pendingSeekPositionRef.current = null;
       }
     };
@@ -1069,7 +1388,7 @@ export default function MusicPlayer({
             Math.min(100, (x / rect.width) * 100),
           );
           const seekTime = (clickPercentage / 100) * duration;
-          audioRef.current.currentTime = seekTime;
+          seekTrackTime(seekTime);
           pendingSeekPositionRef.current = null;
         }
       }
@@ -1087,7 +1406,7 @@ export default function MusicPlayer({
       document.removeEventListener("touchend", handleTouchEnd);
       document.body.style.userSelect = "";
     };
-  }, [isDragging, duration, performPreviewSeek]);
+  }, [isDragging, duration, performPreviewSeek, seekTrackTime]);
 
   const fallbackTrack =
     currentTrack ?? (queue.length > 0 ? queue[0] : undefined);
@@ -1162,7 +1481,7 @@ export default function MusicPlayer({
               sharePassword={sharePassword}
               placement="miniPlayer"
               onSeek={(time) => {
-                if (audioRef.current) audioRef.current.currentTime = time;
+                seekTrackTime(time);
                 setPreviewProgress(time);
               }}
             />

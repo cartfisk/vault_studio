@@ -49,6 +49,13 @@ class FakeElement extends EventTarget {
 		this.currentTime = t;
 		this.dispatchEvent(new Event("timeupdate"));
 	}
+
+	/** Test helper: a user seek. Real elements fire `seeking` synchronously
+	 *  when currentTime is assigned. */
+	seek(t: number): void {
+		this.currentTime = t;
+		this.dispatchEvent(new Event("seeking"));
+	}
 }
 
 /** Records appendBuffer/remove calls and fires `updateend` asynchronously,
@@ -60,33 +67,38 @@ class FakeSourceBuffer extends EventTarget {
 	timestampOffset = 0;
 	appendCalls: ArrayBuffer[] = [];
 	removeCalls: Array<{ start: number; end: number }> = [];
-
-	private bufferedStart = 0;
-	private bufferedEnd = 0;
+	ranges: Array<{ start: number; end: number }> = [];
 
 	constructor(private secondsPerAppend: number) {
 		super();
 	}
 
 	get buffered() {
-		const start = this.bufferedStart;
-		const end = this.bufferedEnd;
+		const ranges = this.ranges;
 		return {
-			length: end > start ? 1 : 0,
-			start: () => start,
-			end: () => end,
+			length: ranges.length,
+			start: (i: number) => ranges[i].start,
+			end: (i: number) => ranges[i].end,
 		};
 	}
 
+	/** Appends grow the range that starts at `timestampOffset`, or open a
+	 *  new one, like a real buffer after a seek. */
 	appendBuffer(data: ArrayBuffer): void {
 		this.appendCalls.push(data);
-		this.bufferedEnd += this.secondsPerAppend;
+		const at = this.timestampOffset;
+		const range = this.ranges.find((r) => r.start <= at && at <= r.end);
+		if (range) range.end += this.secondsPerAppend;
+		else this.ranges.push({ start: at, end: at + this.secondsPerAppend });
+		this.ranges.sort((a, b) => a.start - b.start);
 		queueMicrotask(() => this.dispatchEvent(new Event("updateend")));
 	}
 
 	remove(start: number, end: number): void {
 		this.removeCalls.push({ start, end });
-		this.bufferedStart = end;
+		this.ranges = this.ranges
+			.map((r) => (r.start >= start && r.end <= end ? null : r.start < start && r.end > start ? { ...r, end: Math.min(r.end, start) } : r.start < end && r.end > end ? { ...r, start: Math.max(r.start, end) } : r))
+			.filter((r): r is { start: number; end: number } => r !== null);
 		queueMicrotask(() => this.dispatchEvent(new Event("updateend")));
 	}
 }
@@ -302,5 +314,85 @@ describe("createMseEngine", () => {
 		expect(onError).toHaveBeenCalledTimes(1);
 		expect(onError.mock.calls[0][0]).toBeInstanceOf(Error);
 		expect((onError.mock.calls[0][0] as Error).message).toBe("network down");
+	});
+	describe("seeking", () => {
+		it("measures buffered-ahead from the range containing the playhead, not the last range", async () => {
+			// Two 100s tracks. Seek into b (buffer grows to [100,180]), then
+			// seek back into a hole at 50s. The last range ends 130s ahead of
+			// the playhead; the loop must not wait on that stale range.
+			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
+			await engine.load(playableTrack("a", 1, { sampleCount: 44100 * 100 }));
+			await engine.prepareNext(playableTrack("b", 2, { sampleCount: 44100 * 100 }));
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			element.seek(145);
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			const sb = (element.srcObject as FakeMediaSource).sourceBuffers[0];
+			expect(sb.ranges[sb.ranges.length - 1].end - 50).toBeGreaterThan(LEAD_SECONDS);
+			const before = fetchRange.mock.calls.length;
+
+			element.seek(50);
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+
+			expect(fetchRange.mock.calls.length).toBeGreaterThan(before);
+		});
+
+		it("restarts the loop one fragment before the seek target", async () => {
+			const fragments = Array.from({ length: 10 }, (_, i) => ({ start: i * 100, end: i * 100 + 99 }));
+			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
+			await engine.load(playableTrack("a", 1, { fragments, sampleCount: 44100 * 100 }));
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			fetchRange.mockClear();
+
+			element.seek(65);
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+
+			// init, then fragment 5 (starts at 50s, one before the 60s fragment).
+			expect(fetchRange.mock.calls[0]).toEqual([expect.any(String), 0, 710]);
+			expect(fetchRange.mock.calls[1]).toEqual([expect.any(String), 500, 599]);
+		});
+
+		it("refetches evicted media when the user seeks back", async () => {
+			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
+			await engine.load(playableTrack("a", 1, { sampleCount: 44100 * 100 }));
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			for (const t of [10, 20, 30, 40, 50, 60, 70]) {
+				element.advanceTime(t);
+				await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			}
+			const sb = (element.srcObject as FakeMediaSource).sourceBuffers[0];
+			expect(sb.removeCalls.length).toBeGreaterThan(0);
+			fetchRange.mockClear();
+
+			element.seek(0);
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+
+			expect(fetchRange.mock.calls[0]).toEqual([expect.any(String), 0, 710]);
+			expect(fetchRange.mock.calls[1][1]).toBe(1000); // fragment 0
+		});
+
+		it("does nothing when the target is already buffered", async () => {
+			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
+			await engine.load(playableTrack("a", 1, { sampleCount: 44100 * 100 }));
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			const before = fetchRange.mock.calls.length;
+
+			element.seek(5);
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+
+			expect(fetchRange.mock.calls.length).toBe(before);
+		});
+
+		it("seeks into an appended next track by rebuilding from that track's fragments", async () => {
+			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
+			await engine.load(playableTrack("a", 1, { sampleCount: 44100 * 100 }));
+			await engine.prepareNext(playableTrack("b", 2, { sampleCount: 44100 * 100, fragments: Array.from({ length: 10 }, (_, i) => ({ start: 5000 + i * 100, end: 5000 + i * 100 + 99 })) }));
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			fetchRange.mockClear();
+
+			element.seek(100 + 45); // 45s into track b
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+
+			expect(fetchRange.mock.calls[1]).toEqual([expect.any(String), 5300, 5399]); // b, fragment 3
+		});
 	});
 });

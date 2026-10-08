@@ -19,6 +19,11 @@ import type {
  */
 export const LEAD_SECONDS = 30;
 
+/** Backend fragment length (`FragmentDurationMicros`). Fragments start on a
+ *  packet boundary, so fragment k begins at k*FRAGMENT_SECONDS plus up to
+ *  one codec frame; seeks start one fragment early to cover that. */
+export const FRAGMENT_SECONDS = 10;
+
 export interface MseEngineDeps {
 	element: HTMLAudioElement;
 	mediaSourceImpl: typeof MediaSource;
@@ -55,6 +60,8 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 	let placed: PlacedTrack[] = [];
 	let jobs: AppendJob[] = [];
 	let lastTrackId: string | null = null;
+	/** Manifests are kept per placed track so a seek can rebuild jobs. */
+	const manifests = new Map<string, GaplessManifest>();
 
 	const listeners = new Set<PlaybackEngineEvents>();
 
@@ -150,6 +157,7 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 	// whole lifetime, independent of individual load()/teardown() cycles.
 	element.addEventListener("timeupdate", onTimeUpdate);
 	element.addEventListener("ended", onEnded);
+	element.addEventListener("seeking", onSeeking);
 
 	function onSourceBufferError(err: unknown) {
 		emit("error", err);
@@ -175,6 +183,7 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 	}
 
 	function enqueueJob(track: PlacedTrack, manifest: GaplessManifest) {
+		manifests.set(track.trackId, manifest);
 		jobs.push({
 			trackId: track.trackId,
 			offsetSeconds: track.offsetSeconds,
@@ -186,10 +195,63 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 		});
 	}
 
+	/** Seconds buffered ahead of the playhead IN THE RANGE THAT CONTAINS IT.
+	 *  After a seek the buffer has several ranges, and the last one can be
+	 *  minutes ahead of a playhead that is sitting in a hole. Reading that
+	 *  range would make the loop wait on a stalled element forever. */
 	function bufferedAhead(): number {
-		if (!sourceBuffer || sourceBuffer.buffered.length === 0) return 0;
-		const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-		return end - element.currentTime;
+		const sb = sourceBuffer;
+		if (!sb) return 0;
+		const t = element.currentTime;
+		for (let i = 0; i < sb.buffered.length; i++) {
+			// Small tolerance: a range may start a few ms after the seek target.
+			if (sb.buffered.start(i) - 0.25 <= t && t <= sb.buffered.end(i)) {
+				return sb.buffered.end(i) - t;
+			}
+		}
+		return 0;
+	}
+
+	function isBuffered(t: number): boolean {
+		const sb = sourceBuffer;
+		if (!sb) return false;
+		for (let i = 0; i < sb.buffered.length; i++) {
+			if (sb.buffered.start(i) - 0.25 <= t && t < sb.buffered.end(i)) return true;
+		}
+		return false;
+	}
+
+	function jobFor(track: PlacedTrack, fromFragment: number): AppendJob {
+		const m = manifests.get(track.trackId);
+		if (!m) throw new Error(`createMseEngine: no manifest for ${track.trackId}`);
+		return {
+			trackId: track.trackId,
+			offsetSeconds: track.offsetSeconds,
+			url: m.url,
+			initByteEnd: m.initByteEnd,
+			fragments: m.fragments,
+			initAppended: false,
+			fragIndex: Math.max(0, Math.min(fromFragment, m.fragments.length - 1)),
+		};
+	}
+
+	function onSeeking() {
+		if (!sourceBuffer || currentStop.stopped) return;
+		const t = element.currentTime;
+		if (isBuffered(t)) return;
+		const pos = trackTimeFor(placed, t);
+		if (!pos) return;
+		const idx = placed.indexOf(pos.track);
+		const fromFragment = Math.floor(pos.trackTime / FRAGMENT_SECONDS) - 1;
+
+		// Stop the running loop, rebuild from the target, restart under a new
+		// token so a loop suspended on an await from before the seek cannot
+		// append stale fragments behind us.
+		stop(currentStop);
+		const token = createStopToken();
+		currentStop = token;
+		jobs = [jobFor(pos.track, fromFragment), ...placed.slice(idx + 1).map((p) => jobFor(p, 0))];
+		void runLoop(token);
 	}
 
 	async function appendAndWait(bytes: ArrayBuffer, token: StopToken): Promise<void> {
@@ -277,6 +339,7 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 		stop(currentStop);
 		placed = [];
 		jobs = [];
+		manifests.clear();
 		lastTrackId = trackId;
 		mediaSource = null;
 		sourceBuffer = null;
@@ -348,6 +411,7 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 		}
 		element.removeEventListener("timeupdate", onTimeUpdate);
 		element.removeEventListener("ended", onEnded);
+		element.removeEventListener("seeking", onSeeking);
 		try {
 			(element as unknown as { srcObject: unknown }).srcObject = null;
 		} catch {

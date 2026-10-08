@@ -390,4 +390,45 @@ describe("MusicPlayer engine selection", () => {
 
 		expect(play).toHaveBeenCalledTimes(1);
 	});
+
+	it("clears only its own throwaway srcObject and leaves an engine-attached one alone", async () => {
+		const abort = () => new DOMException("aborted", "AbortError");
+		const setup = async () => {
+			store.set({
+				currentPlayable: { trackId: "t1", versionId: null, url: TRACK_A_URL },
+			});
+			const { container } = render(<MusicPlayer hideControls />);
+			await act(async () => {});
+			const { elMse } = audioElements(container);
+			Object.defineProperty(elMse, "srcObject", {
+				value: null,
+				writable: true,
+				configurable: true,
+			});
+			return elMse;
+		};
+
+		// Scenario 1: nothing replaced the throwaway, so it is detached.
+		const el1 = await setup();
+		el1.muted = false;
+		vi.spyOn(el1, "play").mockRejectedValue(abort());
+		await act(async () => {
+			document.dispatchEvent(new Event("pointerdown"));
+		});
+		expect(el1.srcObject).toBeNull();
+		expect(el1.muted).toBe(false);
+		cleanup();
+
+		// Scenario 2: an engine load() swaps srcObject before the rejection settles.
+		const el2 = await setup();
+		const sentinel = {};
+		vi.spyOn(el2, "play").mockImplementation(() => {
+			(el2 as unknown as { srcObject: unknown }).srcObject = sentinel;
+			return Promise.reject(abort());
+		});
+		await act(async () => {
+			document.dispatchEvent(new Event("pointerdown"));
+		});
+		expect(el2.srcObject).toBe(sentinel);
+	});
 });

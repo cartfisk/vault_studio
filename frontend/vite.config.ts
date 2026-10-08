@@ -30,7 +30,12 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        // Point the dev server at a real backend with:
+        //   VITE_PROXY_TARGET=http://<unraid-ip>:8081 npm run dev
+        // Proxying (rather than calling the backend directly) keeps the browser
+        // on one origin, which sidesteps both CORS and the Secure/SameSite
+        // cookie rules the deployed server enforces.
+        target: process.env.VITE_PROXY_TARGET || 'http://localhost:8080',
         changeOrigin: true,
         ws: true, // Enable WebSocket proxying
         timeout: 300000, // 5 minutes for large exports

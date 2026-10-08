@@ -331,4 +331,24 @@ describe("MusicPlayer engine selection", () => {
 		});
 		expect(elB.src).toBe(TRACK_B_URL);
 	});
+
+	it("logs loudly when it latches MSE off because no engine could be built", async () => {
+		codecSupport.supported = ["alac"];
+		// No MediaSource implementation at all: getMseEngine() returns null.
+		delete (window as unknown as { MediaSource?: unknown }).MediaSource;
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		store.set({
+			currentPlayable: { trackId: "t1", versionId: null, url: TRACK_A_URL, manifest: MANIFEST },
+		});
+
+		render(<MusicPlayer hideControls />);
+		await act(async () => {});
+
+		expect(mse.create).not.toHaveBeenCalled();
+		expect(error).toHaveBeenCalledWith(
+			expect.stringContaining("MSE disabled for this session"),
+			expect.anything(),
+		);
+		error.mockRestore();
+	});
 });

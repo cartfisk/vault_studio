@@ -154,6 +154,15 @@ export default function MusicPlayer({
   // otherwise, and this has been measured not to break AirPlay, since
   // system-level routing still works.
   const mseElRef = useRef<HTMLAudioElement | null>(null);
+  /**
+   * Stable on purpose. An inline `ref={(el) => ...}` gets a new identity each
+   * render, so React detaches (calls with null) and reattaches it on every
+   * re-render, and `mseElRef.current` is transiently null in that window.
+   */
+  const setMseElement = useCallback((el: HTMLAudioElement | null) => {
+    mseElRef.current = el;
+    if (el) el.disableRemotePlayback = true;
+  }, []);
 
   const getElement = useCallback(
     (key: "a" | "b") => (key === "a" ? elARef.current : elBRef.current),
@@ -923,7 +932,12 @@ export default function MusicPlayer({
     if (!mse) {
       // No MediaSource implementation, or the element is not mounted yet.
       // Latch back to the element pair rather than leaving this track with
-      // no engine at all.
+      // no engine at all. Say so: this disables gapless for the rest of the
+      // session, and doing it silently once cost a full debugging session.
+      console.error("[MusicPlayer] MSE disabled for this session: no engine", {
+        elementMounted: !!mseElRef.current,
+        trackId: currentPlayable.trackId,
+      });
       setMseDisabled(true);
       return;
     }
@@ -1042,7 +1056,9 @@ export default function MusicPlayer({
     const audio = audioRef.current;
 
     if (isPlaying) {
-      if (audio.paused && audio.src) {
+      const hasSource =
+        !!audio.src || !!(audio as unknown as { srcObject: unknown }).srcObject;
+      if (audio.paused && hasSource) {
         audio.play().catch((error) => {
           console.error("Failed to resume:", error);
         });
@@ -1470,10 +1486,7 @@ export default function MusicPlayer({
         property exists on `HTMLMediaElement` (and therefore on <audio> too).
       */}
       <audio
-        ref={(el) => {
-          mseElRef.current = el;
-          if (el) el.disableRemotePlayback = true;
-        }}
+        ref={setMseElement}
         preload="auto"
         crossOrigin="anonymous"
         playsInline

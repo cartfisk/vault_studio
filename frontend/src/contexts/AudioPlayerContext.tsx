@@ -1,4 +1,5 @@
 import type React from "react";
+import { gaplessDebug } from "../lib/playback/gaplessDebug";
 import {
   createContext,
   useContext,
@@ -1050,6 +1051,12 @@ export function AudioPlayerProvider({
     if (!next) {
       // The queue emptied after an append: nothing should follow now.
       if (appendedNextIdRef.current) {
+        if (gaplessDebug()) {
+          console.info("[gapless] discardNext", {
+            stale: appendedNextIdRef.current,
+            next: null,
+          });
+        }
         getEngine()?.discardNext();
         appendedNextIdRef.current = null;
       }
@@ -1062,6 +1069,12 @@ export function AudioPlayerProvider({
     // next (queue reorder/remove, shuffle toggle). Retract it before anything
     // else, or the boundary plays the stale track.
     if (appendedNextIdRef.current && appendedNextIdRef.current !== next.id) {
+      if (gaplessDebug()) {
+        console.info("[gapless] discardNext", {
+          stale: appendedNextIdRef.current,
+          next: next.id,
+        });
+      }
       getEngine()?.discardNext();
       appendedNextIdRef.current = null;
       preloadKeyRef.current = null;
@@ -1124,6 +1137,16 @@ export function AudioPlayerProvider({
         const append =
           canAppendNext(engine?.kind ?? "elementPair", nextEngineKind) &&
           (engine?.canAppend(playable) ?? false);
+
+        if (gaplessDebug()) {
+          console.info("[gapless] preload", {
+            append,
+            engineKind: engine?.kind ?? null,
+            nextEngineKind,
+            nextTrackId: next.id,
+            nextHasManifest: !!manifest,
+          });
+        }
 
         if (append) {
           // Marked before the await: `prepareNext` places the track

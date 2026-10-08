@@ -31,6 +31,7 @@ import { createElementPairEngine } from "../lib/playback/elementPairEngine";
 import { createMseEngine } from "../lib/playback/mseEngine";
 import { fetchRange } from "../lib/playback/fetchRange";
 import { supportedLosslessCodecs } from "../lib/playback/codecSupport";
+import { gaplessDebug, rangesOf } from "../lib/playback/gaplessDebug";
 import {
   selectEngine,
   type EngineKind,
@@ -255,6 +256,13 @@ export default function MusicPlayer({
        * on a real crossing, so there is no spurious advance at load.
        */
       trackchange: (trackId: string) => {
+        if (gaplessDebug()) {
+          console.info("[gapless] trackchange", {
+            trackId,
+            elementTime: mseElRef.current?.currentTime,
+            buffered: rangesOf(mseElRef.current),
+          });
+        }
         mseBoundaryTrackIdRef.current = trackId;
         onEndedRef.current();
       },
@@ -849,7 +857,25 @@ export default function MusicPlayer({
     audio.addEventListener("loadedmetadata", handleLoadedMetadata);
     audio.addEventListener("timeupdate", handleTimeUpdate);
 
+    const debugEvents = ["waiting", "stalled", "seeking"] as const;
+    const handleDebugEvent = (event: Event) => {
+      if (!gaplessDebug()) return;
+      console.info(`[gapless] ${event.type}`, {
+        elementTime: audio.currentTime,
+        trackTime: readTrackTime(),
+        buffered: rangesOf(audio),
+      });
+    };
+    if (desiredEngine === "mse") {
+      for (const name of debugEvents) {
+        audio.addEventListener(name, handleDebugEvent);
+      }
+    }
+
     return () => {
+      for (const name of debugEvents) {
+        audio.removeEventListener(name, handleDebugEvent);
+      }
       audio.removeEventListener("play", handlePlay);
       audio.removeEventListener("pause", handlePause);
       audio.removeEventListener("ended", handleEnded);
@@ -968,6 +994,12 @@ export default function MusicPlayer({
         if (cancelled) return;
         mse.setVolume(volumeRef.current / 100);
         const loaded = mse.getTrackDuration();
+        if (gaplessDebug()) {
+          console.info("[gapless] load", {
+            trackId: currentPlayable.trackId,
+            duration: loaded,
+          });
+        }
         if (Number.isFinite(loaded) && loaded > 0) {
           setDuration(loaded);
           onDurationChange(loaded);

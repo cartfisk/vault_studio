@@ -9,29 +9,33 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as ResetPasswordRouteImport } from './routes/reset-password'
-import { Route as AcceptInviteRouteImport } from './routes/accept-invite'
 import { Route as ErrorRouteImport } from './routes/$error'
-import { Route as ProfileRouteRouteImport } from './routes/profile/route'
 import { Route as MainRouteRouteImport } from './routes/_main/route'
-import { Route as ResetSetupIndexRouteImport } from './routes/reset-setup/index'
-import { Route as RegisterIndexRouteImport } from './routes/register/index'
-import { Route as ProfileIndexRouteImport } from './routes/profile/index'
-import { Route as LoginIndexRouteImport } from './routes/login/index'
-import { Route as InitializeIndexRouteImport } from './routes/initialize/index'
+import { Route as AcceptInviteRouteImport } from './routes/accept-invite'
+import { Route as ProfileRouteRouteImport } from './routes/profile/route'
+import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as MainIndexRouteImport } from './routes/_main/index'
-import { Route as ShareTokenRouteImport } from './routes/share/$token'
+import { Route as InitializeIndexRouteImport } from './routes/initialize/index'
 import { Route as InviteTokenRouteImport } from './routes/invite/$token'
-import { Route as SharedTrackTrackIdRouteRouteImport } from './routes/shared-track.$trackId/route'
+import { Route as LoginIndexRouteImport } from './routes/login/index'
+import { Route as ProfileIndexRouteImport } from './routes/profile/index'
 import { Route as ProjectProjectIdRouteRouteImport } from './routes/project.$projectId/route'
-import { Route as SharedTrackTrackIdIndexRouteImport } from './routes/shared-track.$trackId/index'
-import { Route as ProjectProjectIdIndexRouteImport } from './routes/project.$projectId/index'
+import { Route as RegisterIndexRouteImport } from './routes/register/index'
+import { Route as ResetSetupIndexRouteImport } from './routes/reset-setup/index'
+import { Route as ShareTokenRouteImport } from './routes/share/$token'
+import { Route as SharedTrackTrackIdRouteRouteImport } from './routes/shared-track.$trackId/route'
 import { Route as MainFolderFolderIdRouteRouteImport } from './routes/_main/folder.$folderId/route'
+import { Route as ProjectProjectIdIndexRouteImport } from './routes/project.$projectId/index'
+import { Route as SharedTrackTrackIdIndexRouteImport } from './routes/shared-track.$trackId/index'
 import { Route as MainFolderFolderIdIndexRouteImport } from './routes/_main/folder.$folderId/index'
 
-const ResetPasswordRoute = ResetPasswordRouteImport.update({
-  id: '/reset-password',
-  path: '/reset-password',
+const ErrorRoute = ErrorRouteImport.update({
+  id: '/$error',
+  path: '/$error',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MainRouteRoute = MainRouteRouteImport.update({
+  id: '/_main',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AcceptInviteRoute = AcceptInviteRouteImport.update({
@@ -39,43 +43,14 @@ const AcceptInviteRoute = AcceptInviteRouteImport.update({
   path: '/accept-invite',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ErrorRoute = ErrorRouteImport.update({
-  id: '/$error',
-  path: '/$error',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const ProfileRouteRoute = ProfileRouteRouteImport.update({
   id: '/profile',
   path: '/profile',
   getParentRoute: () => rootRouteImport,
 } as any)
-const MainRouteRoute = MainRouteRouteImport.update({
-  id: '/_main',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ResetSetupIndexRoute = ResetSetupIndexRouteImport.update({
-  id: '/reset-setup/',
-  path: '/reset-setup/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const RegisterIndexRoute = RegisterIndexRouteImport.update({
-  id: '/register/',
-  path: '/register/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProfileIndexRoute = ProfileIndexRouteImport.update({
-  id: '/',
-  path: '/',
-  getParentRoute: () => ProfileRouteRoute,
-} as any)
-const LoginIndexRoute = LoginIndexRouteImport.update({
-  id: '/login/',
-  path: '/login/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const InitializeIndexRoute = InitializeIndexRouteImport.update({
-  id: '/initialize/',
-  path: '/initialize/',
+const ResetPasswordRoute = ResetPasswordRouteImport.update({
+  id: '/reset-password',
+  path: '/reset-password',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MainIndexRoute = MainIndexRouteImport.update({
@@ -83,9 +58,9 @@ const MainIndexRoute = MainIndexRouteImport.update({
   path: '/',
   getParentRoute: () => MainRouteRoute,
 } as any)
-const ShareTokenRoute = ShareTokenRouteImport.update({
-  id: '/share/$token',
-  path: '/share/$token',
+const InitializeIndexRoute = InitializeIndexRouteImport.update({
+  id: '/initialize/',
+  path: '/initialize/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const InviteTokenRoute = InviteTokenRouteImport.update({
@@ -93,30 +68,55 @@ const InviteTokenRoute = InviteTokenRouteImport.update({
   path: '/invite/$token',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SharedTrackTrackIdRouteRoute = SharedTrackTrackIdRouteRouteImport.update({
-  id: '/shared-track/$trackId',
-  path: '/shared-track/$trackId',
+const LoginIndexRoute = LoginIndexRouteImport.update({
+  id: '/login/',
+  path: '/login/',
   getParentRoute: () => rootRouteImport,
+} as any)
+const ProfileIndexRoute = ProfileIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => ProfileRouteRoute,
 } as any)
 const ProjectProjectIdRouteRoute = ProjectProjectIdRouteRouteImport.update({
   id: '/project/$projectId',
   path: '/project/$projectId',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SharedTrackTrackIdIndexRoute = SharedTrackTrackIdIndexRouteImport.update({
-  id: '/',
-  path: '/',
-  getParentRoute: () => SharedTrackTrackIdRouteRoute,
+const RegisterIndexRoute = RegisterIndexRouteImport.update({
+  id: '/register/',
+  path: '/register/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResetSetupIndexRoute = ResetSetupIndexRouteImport.update({
+  id: '/reset-setup/',
+  path: '/reset-setup/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ShareTokenRoute = ShareTokenRouteImport.update({
+  id: '/share/$token',
+  path: '/share/$token',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SharedTrackTrackIdRouteRoute = SharedTrackTrackIdRouteRouteImport.update({
+  id: '/shared-track/$trackId',
+  path: '/shared-track/$trackId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MainFolderFolderIdRouteRoute = MainFolderFolderIdRouteRouteImport.update({
+  id: '/folder/$folderId',
+  path: '/folder/$folderId',
+  getParentRoute: () => MainRouteRoute,
 } as any)
 const ProjectProjectIdIndexRoute = ProjectProjectIdIndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => ProjectProjectIdRouteRoute,
 } as any)
-const MainFolderFolderIdRouteRoute = MainFolderFolderIdRouteRouteImport.update({
-  id: '/folder/$folderId',
-  path: '/folder/$folderId',
-  getParentRoute: () => MainRouteRoute,
+const SharedTrackTrackIdIndexRoute = SharedTrackTrackIdIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => SharedTrackTrackIdRouteRoute,
 } as any)
 const MainFolderFolderIdIndexRoute = MainFolderFolderIdIndexRouteImport.update({
   id: '/',
@@ -260,32 +260,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/reset-password': {
-      id: '/reset-password'
-      path: '/reset-password'
-      fullPath: '/reset-password'
-      preLoaderRoute: typeof ResetPasswordRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/accept-invite': {
-      id: '/accept-invite'
-      path: '/accept-invite'
-      fullPath: '/accept-invite'
-      preLoaderRoute: typeof AcceptInviteRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/$error': {
       id: '/$error'
       path: '/$error'
       fullPath: '/$error'
       preLoaderRoute: typeof ErrorRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/profile': {
-      id: '/profile'
-      path: '/profile'
-      fullPath: '/profile'
-      preLoaderRoute: typeof ProfileRouteRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_main': {
@@ -295,39 +274,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof MainRouteRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/reset-setup/': {
-      id: '/reset-setup/'
-      path: '/reset-setup'
-      fullPath: '/reset-setup/'
-      preLoaderRoute: typeof ResetSetupIndexRouteImport
+    '/accept-invite': {
+      id: '/accept-invite'
+      path: '/accept-invite'
+      fullPath: '/accept-invite'
+      preLoaderRoute: typeof AcceptInviteRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/register/': {
-      id: '/register/'
-      path: '/register'
-      fullPath: '/register/'
-      preLoaderRoute: typeof RegisterIndexRouteImport
+    '/profile': {
+      id: '/profile'
+      path: '/profile'
+      fullPath: '/profile'
+      preLoaderRoute: typeof ProfileRouteRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/profile/': {
-      id: '/profile/'
-      path: '/'
-      fullPath: '/profile/'
-      preLoaderRoute: typeof ProfileIndexRouteImport
-      parentRoute: typeof ProfileRouteRoute
-    }
-    '/login/': {
-      id: '/login/'
-      path: '/login'
-      fullPath: '/login/'
-      preLoaderRoute: typeof LoginIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/initialize/': {
-      id: '/initialize/'
-      path: '/initialize'
-      fullPath: '/initialize/'
-      preLoaderRoute: typeof InitializeIndexRouteImport
+    '/reset-password': {
+      id: '/reset-password'
+      path: '/reset-password'
+      fullPath: '/reset-password'
+      preLoaderRoute: typeof ResetPasswordRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_main/': {
@@ -337,11 +302,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof MainIndexRouteImport
       parentRoute: typeof MainRouteRoute
     }
-    '/share/$token': {
-      id: '/share/$token'
-      path: '/share/$token'
-      fullPath: '/share/$token'
-      preLoaderRoute: typeof ShareTokenRouteImport
+    '/initialize/': {
+      id: '/initialize/'
+      path: '/initialize'
+      fullPath: '/initialize/'
+      preLoaderRoute: typeof InitializeIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/invite/$token': {
@@ -351,12 +316,19 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof InviteTokenRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/shared-track/$trackId': {
-      id: '/shared-track/$trackId'
-      path: '/shared-track/$trackId'
-      fullPath: '/shared-track/$trackId'
-      preLoaderRoute: typeof SharedTrackTrackIdRouteRouteImport
+    '/login/': {
+      id: '/login/'
+      path: '/login'
+      fullPath: '/login/'
+      preLoaderRoute: typeof LoginIndexRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/profile/': {
+      id: '/profile/'
+      path: '/'
+      fullPath: '/profile/'
+      preLoaderRoute: typeof ProfileIndexRouteImport
+      parentRoute: typeof ProfileRouteRoute
     }
     '/project/$projectId': {
       id: '/project/$projectId'
@@ -365,12 +337,40 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProjectProjectIdRouteRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/shared-track/$trackId/': {
-      id: '/shared-track/$trackId/'
-      path: '/'
-      fullPath: '/shared-track/$trackId/'
-      preLoaderRoute: typeof SharedTrackTrackIdIndexRouteImport
-      parentRoute: typeof SharedTrackTrackIdRouteRoute
+    '/register/': {
+      id: '/register/'
+      path: '/register'
+      fullPath: '/register/'
+      preLoaderRoute: typeof RegisterIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reset-setup/': {
+      id: '/reset-setup/'
+      path: '/reset-setup'
+      fullPath: '/reset-setup/'
+      preLoaderRoute: typeof ResetSetupIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/share/$token': {
+      id: '/share/$token'
+      path: '/share/$token'
+      fullPath: '/share/$token'
+      preLoaderRoute: typeof ShareTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/shared-track/$trackId': {
+      id: '/shared-track/$trackId'
+      path: '/shared-track/$trackId'
+      fullPath: '/shared-track/$trackId'
+      preLoaderRoute: typeof SharedTrackTrackIdRouteRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_main/folder/$folderId': {
+      id: '/_main/folder/$folderId'
+      path: '/folder/$folderId'
+      fullPath: '/folder/$folderId'
+      preLoaderRoute: typeof MainFolderFolderIdRouteRouteImport
+      parentRoute: typeof MainRouteRoute
     }
     '/project/$projectId/': {
       id: '/project/$projectId/'
@@ -379,12 +379,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProjectProjectIdIndexRouteImport
       parentRoute: typeof ProjectProjectIdRouteRoute
     }
-    '/_main/folder/$folderId': {
-      id: '/_main/folder/$folderId'
-      path: '/folder/$folderId'
-      fullPath: '/folder/$folderId'
-      preLoaderRoute: typeof MainFolderFolderIdRouteRouteImport
-      parentRoute: typeof MainRouteRoute
+    '/shared-track/$trackId/': {
+      id: '/shared-track/$trackId/'
+      path: '/'
+      fullPath: '/shared-track/$trackId/'
+      preLoaderRoute: typeof SharedTrackTrackIdIndexRouteImport
+      parentRoute: typeof SharedTrackTrackIdRouteRoute
     }
     '/_main/folder/$folderId/': {
       id: '/_main/folder/$folderId/'

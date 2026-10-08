@@ -45,6 +45,7 @@ interface AppendJob {
 interface MinimalSourceBuffer extends EventTarget {
 	mode: string;
 	timestampOffset: number;
+	updating: boolean;
 	buffered: { length: number; start(i: number): number; end(i: number): number };
 	appendBuffer(data: ArrayBuffer): void;
 	remove(start: number, end: number): void;
@@ -254,9 +255,19 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 		void runLoop(token);
 	}
 
+	/** Waits until `sb` is not mid-append/remove. A seek stops the old loop
+	 *  while its append may still be in flight on the SAME SourceBuffer, and
+	 *  appendBuffer/remove throw InvalidStateError while `updating`. Not
+	 *  `abort()`: it throws during a remove() and resets the segment parser. */
+	async function whenIdle(sb: MinimalSourceBuffer, token: StopToken): Promise<void> {
+		while (sb.updating && !token.stopped) await waitFor(sb, "updateend", token);
+	}
+
 	async function appendAndWait(bytes: ArrayBuffer, token: StopToken): Promise<void> {
 		const sb = sourceBuffer;
 		if (!sb) return;
+		await whenIdle(sb, token);
+		if (token.stopped) return;
 		const done = waitFor(sb, "updateend", token);
 		sb.appendBuffer(bytes);
 		await done;
@@ -270,6 +281,9 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 		// played, LEAD_SECONDS behind it.
 		const cutoff = Math.min(element.currentTime, element.currentTime - LEAD_SECONDS);
 		if (cutoff > start) {
+			await whenIdle(sb, token);
+			// A loop stopped by a seek must not touch the shared buffer.
+			if (token.stopped) return;
 			const done = waitFor(sb, "updateend", token);
 			sb.remove(start, cutoff);
 			await done;
@@ -317,6 +331,7 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 				const bytes = await fetchRange(job.url, frag.start, frag.end);
 				if (token.stopped) break;
 				await appendAndWait(bytes, token);
+				if (token.stopped) break;
 				job.fragIndex++;
 				await evictBehind(token);
 			}

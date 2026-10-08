@@ -68,9 +68,33 @@ class FakeSourceBuffer extends EventTarget {
 	appendCalls: ArrayBuffer[] = [];
 	removeCalls: Array<{ start: number; end: number }> = [];
 	ranges: Array<{ start: number; end: number }> = [];
+	updating = false;
+	/** When true, `updateend` is held until `finishPending()`, so a test can
+	 *  observe what the engine does while an append/remove is in flight. */
+	holdUpdates = false;
+
+	private pending: Array<() => void> = [];
 
 	constructor(private secondsPerAppend: number) {
 		super();
+	}
+
+	private complete(): void {
+		this.updating = true;
+		const finish = () => {
+			this.updating = false;
+			this.dispatchEvent(new Event("updateend"));
+		};
+		if (this.holdUpdates) this.pending.push(finish);
+		else queueMicrotask(finish);
+	}
+
+	/** Stops holding and completes every held append/remove. */
+	finishPending(): void {
+		this.holdUpdates = false;
+		const pending = this.pending;
+		this.pending = [];
+		for (const finish of pending) finish();
 	}
 
 	get buffered() {
@@ -91,7 +115,7 @@ class FakeSourceBuffer extends EventTarget {
 		if (range) range.end += this.secondsPerAppend;
 		else this.ranges.push({ start: at, end: at + this.secondsPerAppend });
 		this.ranges.sort((a, b) => a.start - b.start);
-		queueMicrotask(() => this.dispatchEvent(new Event("updateend")));
+		this.complete();
 	}
 
 	remove(start: number, end: number): void {
@@ -99,7 +123,7 @@ class FakeSourceBuffer extends EventTarget {
 		this.ranges = this.ranges
 			.map((r) => (r.start >= start && r.end <= end ? null : r.start < start && r.end > start ? { ...r, end: Math.min(r.end, start) } : r.start < end && r.end > end ? { ...r, start: Math.max(r.start, end) } : r))
 			.filter((r): r is { start: number; end: number } => r !== null);
-		queueMicrotask(() => this.dispatchEvent(new Event("updateend")));
+		this.complete();
 	}
 }
 
@@ -393,6 +417,50 @@ describe("createMseEngine", () => {
 			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
 
 			expect(fetchRange.mock.calls[1]).toEqual([expect.any(String), 5300, 5399]); // b, fragment 3
+		});
+		it("waits for an in-flight append to finish before appending after a seek", async () => {
+			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
+			await engine.load(playableTrack("a", 1, { sampleCount: 44100 * 100 }));
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			const sb = (element.srcObject as FakeMediaSource).sourceBuffers[0];
+
+			// Old loop appends fragment 3 and that append stays in flight.
+			sb.holdUpdates = true;
+			element.advanceTime(10);
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			expect(sb.updating).toBe(true);
+			const appendsBefore = sb.appendCalls.length;
+
+			element.seek(65);
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			expect(sb.appendCalls.length).toBe(appendsBefore);
+
+			sb.finishPending();
+			await flushUntilQuiescent(() => sb.appendCalls.length);
+			expect(sb.appendCalls.length).toBeGreaterThan(appendsBefore);
+		});
+
+		it("a loop stopped by a seek does not evict after its pending append resolves", async () => {
+			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
+			await engine.load(playableTrack("a", 1, { sampleCount: 44100 * 100 }));
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			const sb = (element.srcObject as FakeMediaSource).sourceBuffers[0];
+
+			sb.holdUpdates = true;
+			element.advanceTime(10);
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			const removesBefore = sb.removeCalls.length;
+
+			// Seek to 65: unbuffered, and 65 - LEAD_SECONDS = 35 is past the
+			// buffer start, so a stale eviction would remove [0, 35]. The new
+			// loop is parked waiting for the held append, so any remove here
+			// came from the old loop.
+			element.seek(65);
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			expect(sb.removeCalls.length).toBe(removesBefore);
+
+			sb.finishPending();
+			await flushUntilQuiescent(() => sb.appendCalls.length);
 		});
 	});
 });

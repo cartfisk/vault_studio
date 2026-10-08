@@ -292,6 +292,9 @@ export function createElementPairEngine(deps: ElementPairEngineDeps): ElementPai
 		prepareStandby(getStandby(), track.url, getActive()?.volume ?? 1);
 	}
 
+	// Nothing to retract: the next prepareStandby simply overwrites the standby.
+	function discardNext(): void {}
+
 	function teardown(): void {
 		// Pause and detach BOTH elements. The standby can be holding a fully
 		// buffered signed stream for the account that just signed out, so logout
@@ -329,6 +332,7 @@ export function createElementPairEngine(deps: ElementPairEngineDeps): ElementPai
 		pause,
 		load,
 		prepareNext,
+		discardNext,
 		teardown,
 		subscribe,
 	};

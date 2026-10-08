@@ -1139,6 +1139,7 @@ export default function MusicPlayer({
           volumePercentage / 100,
         );
       },
+      discardNext: () => activeTimelineEngine()?.discardNext(),
       subscribe: (events: PlaybackEngineEvents) =>
         (activeTimelineEngine() ?? engine).subscribe(events),
     };

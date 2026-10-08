@@ -101,6 +101,7 @@ function fakeEngine(trackTime: number, canAppend = true) {
 		pause: vi.fn(),
 		canAppend: vi.fn(() => canAppend),
 		prepareNext: vi.fn(async () => {}),
+		discardNext: vi.fn(),
 		teardown: vi.fn(),
 	};
 }
@@ -186,6 +187,8 @@ describe("preload trigger engine selection", () => {
 	async function runPreload(opts: {
 		gapless: boolean;
 		canAppend: boolean;
+		/** Runs after play() and before the preload window opens. */
+		beforePreload?: () => void;
 	}) {
 		codecSupport.codecs = "alac";
 		codecSupport.supported = ["alac"];
@@ -204,6 +207,7 @@ describe("preload trigger engine selection", () => {
 		act(() => {
 			ctx.audioPlayerRef.current = engine;
 		});
+		if (opts.beforePreload) act(opts.beforePreload);
 
 		// Drive the context into the preload window.
 		await act(async () => {
@@ -227,6 +231,30 @@ describe("preload trigger engine selection", () => {
 			expect.objectContaining({ trackId: "t2", manifest: MANIFEST }),
 		);
 		expect(ctx.nextTrackPreload?.engine).toBe("mse");
+	});
+
+	it("retracts an appended next track when the queue changes before the boundary", async () => {
+		// Queue [t3] makes t3 next; removing it leaves t2 next by project order.
+		const engine = await runPreload({
+			gapless: true,
+			canAppend: true,
+			beforePreload: () => ctx.addToQueue(TRACKS[2]),
+		});
+		expect(engine.prepareNext).toHaveBeenCalledTimes(1);
+		expect(engine.prepareNext).toHaveBeenNthCalledWith(1, expect.objectContaining({ trackId: "t3" }));
+		expect(engine.discardNext).not.toHaveBeenCalled();
+
+		await act(async () => {
+			ctx.removeFromQueue(0);
+		});
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+
+		expect(engine.discardNext).toHaveBeenCalledTimes(1);
+		expect(engine.prepareNext).toHaveBeenCalledTimes(2);
+		expect(engine.prepareNext).toHaveBeenNthCalledWith(2, expect.objectContaining({ trackId: "t2" }));
 	});
 
 	it("hands off instead of appending when there is no manifest", async () => {

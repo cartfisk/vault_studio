@@ -97,6 +97,7 @@ type ContextEngine = Pick<
   | "seekToTrackTime"
   | "canAppend"
   | "prepareNext"
+  | "discardNext"
   | "teardown"
 > & { kind: EngineKind; getPlaybackRate?: () => number };
 
@@ -190,6 +191,9 @@ export function AudioPlayerProvider({
    * latching it off.
    */
   const preloadKeyRef = useRef<string | null>(null);
+  /** The track `prepareNext` appended to the live timeline, until it becomes
+   *  current. Lets the preload effect retract it if "next" changes first. */
+  const appendedNextIdRef = useRef<string | null>(null);
   const [loopMode, setLoopMode] = useState<LoopMode>("off");
   const [isShuffled, setIsShuffled] = useState(false);
   const shareTokenRef = useRef<string | null>(null);
@@ -1034,9 +1038,23 @@ export function AudioPlayerProvider({
 
     const next = getNextTrack();
     if (!next) {
+      // The queue emptied after an append: nothing should follow now.
+      if (appendedNextIdRef.current) {
+        getEngine()?.discardNext();
+        appendedNextIdRef.current = null;
+      }
       setNextTrackPreload(null);
       preloadKeyRef.current = null;
       return;
+    }
+
+    // A track was appended to the live timeline for a next that is no longer
+    // next (queue reorder/remove, shuffle toggle). Retract it before anything
+    // else, or the boundary plays the stale track.
+    if (appendedNextIdRef.current && appendedNextIdRef.current !== next.id) {
+      getEngine()?.discardNext();
+      appendedNextIdRef.current = null;
+      preloadKeyRef.current = null;
     }
 
     const key = `${currentTrack.id}:${next.id}:${qualityPreference}`;
@@ -1098,6 +1116,10 @@ export function AudioPlayerProvider({
           (engine?.canAppend(playable) ?? false);
 
         if (append) {
+          // Marked before the await: `prepareNext` places the track
+          // synchronously, so it is on the timeline even if this run is
+          // cancelled while the promise settles.
+          appendedNextIdRef.current = next.id;
           await engine?.prepareNext(playable);
         }
 
@@ -1149,6 +1171,8 @@ export function AudioPlayerProvider({
   useEffect(() => {
     setNextTrackPreload(null);
     preloadKeyRef.current = null;
+    // The appended track is the current one now; nothing left to retract.
+    appendedNextIdRef.current = null;
   }, [currentTrack?.id]);
 
   useEffect(() => {

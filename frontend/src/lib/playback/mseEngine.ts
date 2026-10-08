@@ -63,6 +63,10 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 	let lastTrackId: string | null = null;
 	/** Manifests are kept per placed track so a seek can rebuild jobs. */
 	const manifests = new Map<string, GaplessManifest>();
+	/** Set by discardNext(): everything from here on is a retracted track's
+	*  media. The loop removes it before its next append, so the remove and
+	*  the appends have one writer and cannot interleave. */
+	let trimFrom: number | null = null;
 
 	const listeners = new Set<PlaybackEngineEvents>();
 
@@ -258,6 +262,33 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 		void runLoop(token);
 	}
 
+	function discardNext(): void {
+		if (!sourceBuffer || currentStop.stopped) return;
+		const pos = currentPosition();
+		if (!pos) return;
+		const idx = placed.indexOf(pos.track);
+		if (idx === placed.length - 1) return;
+
+		const keep = pos.track;
+		const end = keep.offsetSeconds + durationSeconds(keep);
+		for (const dropped of placed.slice(idx + 1)) manifests.delete(dropped.trackId);
+		placed = placed.slice(0, idx + 1);
+		trimFrom = end;
+
+		// Resume the kept track after what will survive the trim: the range
+		// under the playhead, cut at `end`. The rebuilt job re-sends the init
+		// segment, which the media needs since the dropped track's was last.
+		const survivesTo = Math.min(pos.trackTime + bufferedAhead(), durationSeconds(keep));
+		const fromFragment = Math.floor(survivesTo / FRAGMENT_SECONDS);
+		const fragmentCount = manifests.get(keep.trackId)?.fragments.length ?? 0;
+
+		stop(currentStop);
+		const token = createStopToken();
+		currentStop = token;
+		jobs = fromFragment < fragmentCount ? [jobFor(keep, fromFragment)] : [];
+		void runLoop(token);
+	}
+
 	/** Waits until `sb` is not mid-append/remove. A seek stops the old loop
 	 *  while its append may still be in flight on the SAME SourceBuffer, and
 	 *  appendBuffer/remove throw InvalidStateError while `updating`. Not
@@ -298,9 +329,21 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 		token.loopRunning = true;
 		try {
 			while (!token.stopped) {
+				if (!sourceBuffer) break;
+
+				if (trimFrom !== null) {
+					const sb = sourceBuffer;
+					await whenIdle(sb, token);
+					if (token.stopped) break;
+					const done = waitFor(sb, "updateend", token);
+					sb.remove(trimFrom, Number.POSITIVE_INFINITY);
+					trimFrom = null;
+					await done;
+					continue;
+				}
+
 				const job = jobs[0];
 				if (!job) break;
-				if (!sourceBuffer) break;
 
 				if (sourceBuffer.timestampOffset !== job.offsetSeconds) {
 					// Setting timestampOffset while `updating` throws, and a
@@ -364,6 +407,7 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 		placed = [];
 		jobs = [];
 		manifests.clear();
+		trimFrom = null;
 		lastTrackId = trackId;
 		mediaSource = null;
 		sourceBuffer = null;
@@ -463,6 +507,7 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 		setVolume,
 		canAppend,
 		prepareNext,
+		discardNext,
 		teardown,
 		subscribe,
 	};

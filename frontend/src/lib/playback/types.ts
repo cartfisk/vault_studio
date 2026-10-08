@@ -73,6 +73,11 @@ export interface PlaybackEngine {
 	setVolume(v: number): void;
 	canAppend(track: PlayableTrack): boolean;
 	prepareNext(track: PlayableTrack): Promise<void>;
+	/** Drop every track placed after the one under the playhead, and its
+	*  media. The preload path calls this when the queue changes after an
+	*  append so the boundary does not run into a track that is no longer
+	*  next. No-op when nothing is appended. */
+	discardNext(): void;
 	teardown(): void;
 	subscribe(events: PlaybackEngineEvents): () => void;
 }

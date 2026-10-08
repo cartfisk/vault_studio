@@ -518,4 +518,98 @@ describe("createMseEngine", () => {
 			expect(fetchRange.mock.calls.length).toBeGreaterThan(before);
 		});
 	});
+
+	describe("discardNext", () => {
+		const B_URL = "/api/stream/b/gapless/alac?version_id=2";
+		const C_URL = "/api/stream/c/gapless/alac?version_id=3";
+
+		it("removes the appended track's media and stops appending it", async () => {
+			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
+			await engine.load(playableTrack("a", 1, { sampleCount: 44100 * 100 }));
+			await engine.prepareNext(playableTrack("b", 2, { sampleCount: 44100 * 100, url: B_URL }));
+			// Play to 80s so the loop has appended into b (offset 100s).
+			for (const t of [10, 20, 30, 40, 50, 60, 70, 80]) {
+				element.advanceTime(t);
+				await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			}
+			const sb = (element.srcObject as FakeMediaSource).sourceBuffers[0];
+			expect(fetchRange.mock.calls.some(([url]) => url === B_URL)).toBe(true);
+			expect(sb.ranges.at(-1)!.end).toBeGreaterThan(100);
+			fetchRange.mockClear();
+
+			engine.discardNext();
+			await flushUntilQuiescent(() => sb.removeCalls.length + fetchRange.mock.calls.length);
+
+			// Not `.at(-1)`: refilling the kept track evicts behind the playhead.
+			expect(sb.removeCalls).toContainEqual({ start: 100, end: Number.POSITIVE_INFINITY });
+			expect(sb.ranges.at(-1)!.end).toBeLessThanOrEqual(100);
+			element.advanceTime(90);
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			for (const [url] of fetchRange.mock.calls) {
+				expect(url).not.toBe(B_URL);
+			}
+			expect(engine.getTrackDuration()).toBe(100);
+		});
+
+		it("re-appends a different next track after a discard", async () => {
+			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
+			const onError = vi.fn();
+			engine.subscribe({ error: onError });
+			await engine.load(playableTrack("a", 1, { sampleCount: 44100 * 100 }));
+			await engine.prepareNext(playableTrack("b", 2, { sampleCount: 44100 * 100, url: B_URL }));
+			engine.discardNext();
+			await engine.prepareNext(playableTrack("c", 3, { sampleCount: 44100 * 100, url: C_URL }));
+			for (const t of [10, 20, 30, 40, 50, 60, 70, 80, 90]) {
+				element.advanceTime(t);
+				await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			}
+			const urls = fetchRange.mock.calls.map(([url]) => url);
+			expect(urls).toContain(C_URL);
+			expect(urls).not.toContain(B_URL);
+			expect(onError).not.toHaveBeenCalled();
+			element.advanceTime(105);
+			expect(engine.getTrackTime()).toBeCloseTo(5, 3);
+		});
+
+		it("waits for an in-flight append before removing the discarded media", async () => {
+			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
+			await engine.load(playableTrack("a", 1, { sampleCount: 44100 * 100 }));
+			await engine.prepareNext(playableTrack("b", 2, { sampleCount: 44100 * 100, url: B_URL }));
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			const sb = (element.srcObject as FakeMediaSource).sourceBuffers[0];
+
+			sb.holdUpdates = true;
+			element.advanceTime(10);
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			expect(sb.updating).toBe(true);
+			const removesBefore = sb.removeCalls.length;
+
+			engine.discardNext();
+			await flushUntilQuiescent(() => sb.removeCalls.length);
+			expect(sb.removeCalls.length).toBe(removesBefore);
+
+			sb.finishPending();
+			await flushUntilQuiescent(() => sb.removeCalls.length + sb.appendCalls.length);
+			expect(sb.removeCalls.at(-1)).toEqual({ start: 100, end: Number.POSITIVE_INFINITY });
+		});
+
+		it("does nothing when no next track is appended", async () => {
+			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
+			await engine.load(playableTrack("a", 1, { sampleCount: 44100 * 100 }));
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			const sb = (element.srcObject as FakeMediaSource).sourceBuffers[0];
+			const before = fetchRange.mock.calls.length;
+
+			engine.discardNext();
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+
+			expect(sb.removeCalls).toHaveLength(0);
+			expect(fetchRange.mock.calls.length).toBe(before);
+		});
+
+		it("does nothing before load()", () => {
+			const { engine } = makeEngine();
+			expect(() => engine.discardNext()).not.toThrow();
+		});
+	});
 });

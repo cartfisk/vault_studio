@@ -593,6 +593,31 @@ describe("createMseEngine", () => {
 			expect(sb.removeCalls.at(-1)).toEqual({ start: 100, end: Number.POSITIVE_INFINITY });
 		});
 
+		it("keeps the manifest when the dropped track is a second placement of the kept one", async () => {
+			// addToQueue does not dedupe: the same track can be next after itself.
+			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
+			const onError = vi.fn();
+			engine.subscribe({ error: onError });
+			await engine.load(playableTrack("a", 1, { sampleCount: 44100 * 100 }));
+			await engine.prepareNext(playableTrack("a", 1, { sampleCount: 44100 * 100 }));
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+
+			engine.discardNext();
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			fetchRange.mockClear();
+			for (const t of [10, 20, 30, 40, 50]) {
+				element.advanceTime(t);
+				await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			}
+			expect(fetchRange.mock.calls.length).toBeGreaterThan(0);
+
+			fetchRange.mockClear();
+			element.seek(5);
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			expect(fetchRange.mock.calls.length).toBeGreaterThan(0);
+			expect(onError).not.toHaveBeenCalled();
+		});
+
 		it("does nothing when no next track is appended", async () => {
 			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
 			await engine.load(playableTrack("a", 1, { sampleCount: 44100 * 100 }));

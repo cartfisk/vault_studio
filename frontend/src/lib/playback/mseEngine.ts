@@ -271,8 +271,13 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 
 		const keep = pos.track;
 		const end = keep.offsetSeconds + durationSeconds(keep);
-		for (const dropped of placed.slice(idx + 1)) manifests.delete(dropped.trackId);
+		const dropped = placed.slice(idx + 1);
 		placed = placed.slice(0, idx + 1);
+		// The same track can be placed twice (the queue does not dedupe), so
+		// keep a manifest a surviving placement still needs.
+		for (const { trackId } of dropped) {
+			if (!placed.some((p) => p.trackId === trackId)) manifests.delete(trackId);
+		}
 		trimFrom = end;
 
 		// Resume the kept track after what will survive the trim: the range

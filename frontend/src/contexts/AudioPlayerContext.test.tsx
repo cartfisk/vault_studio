@@ -189,6 +189,8 @@ describe("preload trigger engine selection", () => {
 		canAppend: boolean;
 		/** Runs after play() and before the preload window opens. */
 		beforePreload?: () => void;
+		/** Track to start from; defaults to the first. */
+		start?: (typeof TRACKS)[number];
 	}) {
 		codecSupport.codecs = "alac";
 		codecSupport.supported = ["alac"];
@@ -202,7 +204,7 @@ describe("preload trigger engine selection", () => {
 		const engine = fakeEngine(5, opts.canAppend);
 
 		await act(async () => {
-			await ctx.play(TRACKS[0], TRACKS, true);
+			await ctx.play(opts.start ?? TRACKS[0], TRACKS, true);
 		});
 		act(() => {
 			ctx.audioPlayerRef.current = engine;
@@ -255,6 +257,50 @@ describe("preload trigger engine selection", () => {
 		expect(engine.discardNext).toHaveBeenCalledTimes(1);
 		expect(engine.prepareNext).toHaveBeenCalledTimes(2);
 		expect(engine.prepareNext).toHaveBeenNthCalledWith(2, expect.objectContaining({ trackId: "t2" }));
+	});
+
+	it("retracts an appended next track when the queue empties", async () => {
+		// Playing the last project track: only the queued t1 follows it.
+		const engine = await runPreload({
+			gapless: true,
+			canAppend: true,
+			start: TRACKS[2],
+			beforePreload: () => ctx.addToQueue(TRACKS[0]),
+		});
+		expect(engine.prepareNext).toHaveBeenNthCalledWith(1, expect.objectContaining({ trackId: "t1" }));
+
+		await act(async () => {
+			ctx.removeFromQueue(0);
+		});
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+
+		expect(engine.discardNext).toHaveBeenCalledTimes(1);
+		expect(ctx.nextTrackPreload).toBeNull();
+	});
+
+	it("does not retract the appended track once it becomes current", async () => {
+		const engine = await runPreload({ gapless: true, canAppend: true });
+		expect(engine.prepareNext).toHaveBeenNthCalledWith(1, expect.objectContaining({ trackId: "t2" }));
+
+		// The appended t2 becomes current; t3 is next.
+		await act(async () => {
+			ctx.nextTrack();
+		});
+		await act(async () => {
+			ctx.onDurationChange(100);
+			ctx.onProgressUpdate(95);
+		});
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+
+		expect(ctx.currentTrack?.id).toBe("t2");
+		expect(engine.discardNext).not.toHaveBeenCalled();
+		expect(engine.prepareNext).toHaveBeenNthCalledWith(2, expect.objectContaining({ trackId: "t3" }));
 	});
 
 	it("hands off instead of appending when there is no manifest", async () => {

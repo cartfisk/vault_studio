@@ -1030,6 +1030,16 @@ export function AudioPlayerProvider({
     duration,
   });
 
+  // Declared before the preload effect so that, on the commit where the
+  // appended track becomes current, the preload effect sees a cleared ref
+  // and does not retract the track now playing.
+  useEffect(() => {
+    setNextTrackPreload(null);
+    preloadKeyRef.current = null;
+    // The appended track is the current one now; nothing left to retract.
+    appendedNextIdRef.current = null;
+  }, [currentTrack?.id]);
+
   useEffect(() => {
     if (!isPlaying || !currentTrack) return;
     // Native looping means `ended` never fires, so there is nothing to preload.
@@ -1167,13 +1177,6 @@ export function AudioPlayerProvider({
       setNextTrackPreload(null);
     }
   }, [isPlaying, nextTrackPreload]);
-
-  useEffect(() => {
-    setNextTrackPreload(null);
-    preloadKeyRef.current = null;
-    // The appended track is the current one now; nothing left to retract.
-    appendedNextIdRef.current = null;
-  }, [currentTrack?.id]);
 
   useEffect(() => {
     if (!isAuthenticated) {

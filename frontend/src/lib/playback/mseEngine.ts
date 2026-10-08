@@ -213,11 +213,14 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 		return 0;
 	}
 
+	/** No start tolerance, unlike bufferedAhead: a target just before a range
+	 *  is a hole the element stalls in, and a rebuild (which starts one
+	 *  fragment early) is the only way out. */
 	function isBuffered(t: number): boolean {
 		const sb = sourceBuffer;
 		if (!sb) return false;
 		for (let i = 0; i < sb.buffered.length; i++) {
-			if (sb.buffered.start(i) - 0.25 <= t && t < sb.buffered.end(i)) return true;
+			if (sb.buffered.start(i) <= t && t < sb.buffered.end(i)) return true;
 		}
 		return false;
 	}
@@ -300,7 +303,13 @@ export function createMseEngine(deps: MseEngineDeps): PlaybackEngine {
 				if (!sourceBuffer) break;
 
 				if (sourceBuffer.timestampOffset !== job.offsetSeconds) {
-					sourceBuffer.timestampOffset = job.offsetSeconds;
+					// Setting timestampOffset while `updating` throws, and a
+					// cross-track seek can land while the old loop's append is
+					// still in flight.
+					const sb = sourceBuffer;
+					await whenIdle(sb, token);
+					if (token.stopped) break;
+					sb.timestampOffset = job.offsetSeconds;
 				}
 
 				if (!job.initAppended) {

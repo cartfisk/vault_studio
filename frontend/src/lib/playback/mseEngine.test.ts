@@ -64,7 +64,6 @@ class FakeElement extends EventTarget {
  *  control flow, not to decode media. */
 class FakeSourceBuffer extends EventTarget {
 	mode = "";
-	timestampOffset = 0;
 	appendCalls: ArrayBuffer[] = [];
 	removeCalls: Array<{ start: number; end: number }> = [];
 	ranges: Array<{ start: number; end: number }> = [];
@@ -74,6 +73,17 @@ class FakeSourceBuffer extends EventTarget {
 	holdUpdates = false;
 
 	private pending: Array<() => void> = [];
+	private offset = 0;
+
+	get timestampOffset(): number {
+		return this.offset;
+	}
+
+	/** Like a real SourceBuffer, refuses a new offset mid-append/remove. */
+	set timestampOffset(v: number) {
+		if (this.updating) throw new DOMException("timestampOffset set while updating", "InvalidStateError");
+		this.offset = v;
+	}
 
 	constructor(private secondsPerAppend: number) {
 		super();
@@ -400,7 +410,9 @@ describe("createMseEngine", () => {
 			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
 			const before = fetchRange.mock.calls.length;
 
-			element.seek(5);
+			// 15s, not near 0: buffer is [0,40], so only 25s is ahead and a
+			// needless rebuild would not be hidden by backpressure.
+			element.seek(15);
 			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
 
 			expect(fetchRange.mock.calls.length).toBe(before);
@@ -461,6 +473,49 @@ describe("createMseEngine", () => {
 
 			sb.finishPending();
 			await flushUntilQuiescent(() => sb.appendCalls.length);
+		});
+
+		it("waits for an in-flight append before changing timestampOffset after a cross-track seek", async () => {
+			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
+			const onError = vi.fn();
+			engine.subscribe({ error: onError });
+			await engine.load(playableTrack("a", 1, { sampleCount: 44100 * 100 }));
+			await engine.prepareNext(playableTrack("b", 2, { sampleCount: 44100 * 100 }));
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			const sb = (element.srcObject as FakeMediaSource).sourceBuffers[0];
+
+			sb.holdUpdates = true;
+			element.advanceTime(10);
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			expect(sb.updating).toBe(true);
+			const appendsBefore = sb.appendCalls.length;
+
+			element.seek(145); // into b, offset 100
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			expect(onError).not.toHaveBeenCalled();
+
+			sb.finishPending();
+			await flushUntilQuiescent(() => sb.appendCalls.length);
+			expect(onError).not.toHaveBeenCalled();
+			expect(sb.timestampOffset).toBe(100);
+			expect(sb.appendCalls.length).toBeGreaterThan(appendsBefore);
+		});
+
+		it("rebuilds when the target sits in a hole just before a buffered range", async () => {
+			const { element, fetchRange, engine } = makeEngine({ secondsPerAppend: 10 });
+			await engine.load(playableTrack("a", 1, { sampleCount: 44100 * 100 }));
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+			const sb = (element.srcObject as FakeMediaSource).sourceBuffers[0];
+			sb.ranges = [
+				{ start: 0, end: 40 },
+				{ start: 50.1, end: 80 },
+			];
+			const before = fetchRange.mock.calls.length;
+
+			element.seek(50);
+			await flushUntilQuiescent(() => fetchRange.mock.calls.length);
+
+			expect(fetchRange.mock.calls.length).toBeGreaterThan(before);
 		});
 	});
 });

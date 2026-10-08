@@ -11,17 +11,27 @@ import {
   Download,
   ListPlus,
   Trash2,
+  Film,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
 } from "@/components/ui/dropdown-menu";
+import {
+  type ProjectPageArtworkMode,
+  PROJECT_PAGE_ARTWORK_MODE_KEY,
+  isProjectPageArtworkMode,
+  resolveProjectPageArtworkMode,
+} from "@/lib/motionArtwork";
 import { useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   useDeleteProject,
   useProject,
@@ -36,6 +46,7 @@ import { useQueryClient, useQuery } from "@tanstack/react-query";
 import { useTracks } from "@/hooks/useTracks";
 import { useAudioPlayer } from "@/contexts/AudioPlayerContext";
 import { useProjectCoverImage } from "@/hooks/useProjectCoverImage";
+import { useProjectMotionAssets } from "@/hooks/useProjectMotionAssets";
 import DeleteProjectModal from "@/components/modals/DeleteProjectModal";
 import LeaveProjectModal from "@/components/modals/LeaveProjectModal";
 import MoveProjectModal from "@/components/modals/MoveProjectModal";
@@ -56,8 +67,10 @@ function ProjectLayout() {
   const { projectId } = Route.useParams();
   const { data: project } = useProject(projectId);
   const { data: tracks = [] } = useTracks(project ? project.id : null);
-  const { addProjectToQueue } = useAudioPlayer();
+  const { addProjectToQueue, currentTrack, isNowPlayingOpen, closeNowPlaying } =
+    useAudioPlayer();
   const { imageUrl: projectCoverImage } = useProjectCoverImage(project, "medium");
+  const { data: motionAssets = [] } = useProjectMotionAssets(project?.public_id);
   const deleteProject = useDeleteProject();
   const duplicateProject = useDuplicateProject();
   const exportProject = useExportProject();
@@ -69,6 +82,48 @@ function ProjectLayout() {
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [isLeaving, setIsLeaving] = useState(false);
+  const projectArtist =
+    project?.author_override || project?.owner_username || user?.username;
+  const isCurrentProjectNowPlaying = Boolean(
+    isNowPlayingOpen && currentTrack?.projectId === project?.public_id,
+  );
+
+  const [projectArtworkMode, setProjectArtworkMode] =
+    useState<ProjectPageArtworkMode>(() => {
+      if (typeof window === "undefined") return "apple_portrait";
+      const saved = window.localStorage.getItem(PROJECT_PAGE_ARTWORK_MODE_KEY);
+      return isProjectPageArtworkMode(saved) ? saved : "apple_portrait";
+    });
+
+  useEffect(() => {
+    const handleModeChange = () => {
+      const saved = window.localStorage.getItem(PROJECT_PAGE_ARTWORK_MODE_KEY);
+      if (isProjectPageArtworkMode(saved)) {
+        setProjectArtworkMode(saved);
+      }
+    };
+    window.addEventListener("project-artwork-mode-change", handleModeChange);
+    window.addEventListener("storage", handleModeChange);
+    return () => {
+      window.removeEventListener("project-artwork-mode-change", handleModeChange);
+      window.removeEventListener("storage", handleModeChange);
+    };
+  }, []);
+
+  const handleArtworkModeChange = (mode: string) => {
+    if (!isProjectPageArtworkMode(mode)) return;
+    setProjectArtworkMode(mode);
+    window.localStorage.setItem(PROJECT_PAGE_ARTWORK_MODE_KEY, mode);
+    window.dispatchEvent(
+      new CustomEvent("project-artwork-mode-change", { detail: mode }),
+    );
+  };
+
+  const hasMobilePortraitArtwork =
+    resolveProjectPageArtworkMode(
+      projectArtworkMode,
+      motionAssets.map((asset) => asset.kind),
+    ) === "apple_portrait";
 
   const { data: sharedProjects = [] } = useQuery({
     queryKey: ["shared-projects"],
@@ -128,7 +183,7 @@ function ProjectLayout() {
     const projectTracks = tracks.map((t) => ({
       id: t.public_id,
       title: String(t.title),
-      artist: t.artist,
+      artist: t.artist || projectArtist,
       projectName: String(project.name),
       coverUrl: projectCoverImage,
       projectId: project.public_id,
@@ -186,13 +241,25 @@ function ProjectLayout() {
 
   return (
     <>
-      <div className="min-h-screen bg-background">
-        <header className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between bg-linear-to-b from-background from-30% to-transparent text-(--text-0) md:p-10 p-6">
+      <div
+        className={`min-h-screen bg-background ${
+          hasMobilePortraitArtwork ? "mobile-project-motion-page" : ""
+        }`}
+      >
+        <header
+          className={`project-page-header fixed top-0 left-0 right-0 z-50 flex items-center justify-between bg-linear-to-b from-background from-30% to-transparent text-(--text-0) md:p-10 p-6 ${
+            hasMobilePortraitArtwork ? "mobile-project-motion-header" : ""
+          }`}
+        >
           <Button
             variant="default"
             size="icon-lg"
             haptic="light"
-            onClick={() => window.history.back()}
+            onClick={() => {
+              if (isCurrentProjectNowPlaying) closeNowPlaying();
+              window.history.back();
+            }}
+            className="transition-transform duration-300"
           >
             <ChevronLeftIcon className="size-4.5" />
           </Button>
@@ -229,8 +296,30 @@ function ProjectLayout() {
               <DropdownMenuContent
                 align="end"
                 sideOffset={8}
-                className="w-44 border-muted bg-background"
+                collisionPadding={16}
+                className="w-56 max-w-[calc(100vw-2rem)] border-muted bg-background sm:w-48"
               >
+                <div className="sm:hidden">
+                  <DropdownMenuLabel className="flex items-center gap-2 text-(--text-0)/60">
+                    <Film className="size-4.5" />
+                    Artwork display
+                  </DropdownMenuLabel>
+                  <DropdownMenuRadioGroup
+                    value={projectArtworkMode}
+                    onValueChange={handleArtworkModeChange}
+                  >
+                    <DropdownMenuRadioItem value="apple_portrait">
+                      Apple Motion 3x4
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuRadioItem value="apple_square">
+                      Apple Motion 1x1
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuRadioItem value="still_cover">
+                      Static Cover
+                    </DropdownMenuRadioItem>
+                  </DropdownMenuRadioGroup>
+                  <DropdownMenuSeparator />
+                </div>
                 <DropdownMenuItem
                   onSelect={() =>
                     window.dispatchEvent(new Event("project-rename"))

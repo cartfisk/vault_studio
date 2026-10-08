@@ -1,4 +1,4 @@
-import { X, MoreHorizontal, FolderOpen } from "lucide-react";
+import { X, MoreHorizontal, FolderOpen, GripVertical } from "lucide-react";
 import { useAudioPlayer } from "@/contexts/AudioPlayerContext";
 import { AnimatePresence, motion } from "motion/react";
 import { createPortal } from "react-dom";
@@ -9,7 +9,7 @@ import {
   Draggable,
   type DropResult,
 } from "@hello-pangea/dnd";
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   DropdownMenu,
@@ -19,10 +19,12 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 interface QueuePanelProps {
   isOpen: boolean;
   onClose: () => void;
+  layer?: "player" | "expanded";
 }
 
 interface QueueTrack {
@@ -60,39 +62,16 @@ function QueueTrackCover({ track }: { track: QueueTrack }) {
   );
 }
 
-export default function QueuePanel({ isOpen, onClose }: QueuePanelProps) {
+export default function QueuePanel({
+  isOpen,
+  onClose,
+  layer = "player",
+}: QueuePanelProps) {
   const { queue, removeFromQueue, clearQueue, reorderQueue } = useAudioPlayer();
   const navigate = useNavigate();
   const routerState = useRouterState();
   const [openMenuIndex, setOpenMenuIndex] = useState<number | null>(null);
   const queueContentRef = useRef<HTMLDivElement | null>(null);
-  const [contentHeight, setContentHeight] = useState(0);
-  const shouldAnimateHeight = useRef(false);
-
-  useEffect(() => {
-    if (!isOpen) {
-      shouldAnimateHeight.current = false;
-    }
-  }, [isOpen]);
-
-  useEffect(() => {
-    if (isOpen) {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          if (queueContentRef.current) {
-            const wrapper = queueContentRef.current;
-            const originalHeight = wrapper.style.height;
-            wrapper.style.height = "auto";
-            const naturalHeight = wrapper.scrollHeight;
-            wrapper.style.height = originalHeight;
-            setContentHeight(Math.min(naturalHeight, 500));
-
-            shouldAnimateHeight.current = true;
-          }
-        });
-      });
-    }
-  }, [queue.length, isOpen]);
 
   const handleClearQueue = () => {
     clearQueue();
@@ -163,20 +142,28 @@ export default function QueuePanel({ isOpen, onClose }: QueuePanelProps) {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.1 }}
-            className="fixed inset-0 z-119 overlay-backdrop"
+            className={cn(
+              "fixed inset-0 overlay-backdrop",
+              layer === "expanded" ? "z-[10000]" : "z-119",
+            )}
             onClick={onClose}
           />
 
           <motion.div
-            initial={{ opacity: 0, y: 5, filter: "blur(8px)" }}
-            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-            exit={{ opacity: 0, y: 5, filter: "blur(4px)" }}
+            initial={{ opacity: 0, y: 5 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 5 }}
             transition={{
               type: "spring",
               stiffness: 700,
               damping: 40,
             }}
-            className="fixed bottom-[145px] left-1/2 -translate-x-1/2 z-120 w-[calc(100%-1rem)] sm:w-[calc(100%-3rem)] max-w-[800px]"
+            className={cn(
+              "fixed inset-x-2 sm:inset-x-6 mx-auto max-w-[800px]",
+              layer === "expanded"
+                ? "bottom-[max(env(safe-area-inset-bottom),1rem)] z-[10001]"
+                : "bottom-[145px] z-120",
+            )}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="relative flex max-h-[500px] w-full flex-col overflow-hidden rounded-3xl text-(--text-0) shadow-2xl border border-(--card-border) overlay-surface">
@@ -207,21 +194,9 @@ export default function QueuePanel({ isOpen, onClose }: QueuePanelProps) {
                 )}
               </div>
 
-              <motion.div
+              <div
                 ref={queueContentRef}
-                initial={{ height: "auto" }}
-                animate={{
-                  height: shouldAnimateHeight.current ? contentHeight : "auto",
-                }}
-                transition={{
-                  height: {
-                    type: "spring",
-                    stiffness: 450,
-                    damping: 35,
-                    bounce: 0,
-                  },
-                }}
-                className="overflow-y-auto px-2 hide-scrollbar"
+                className="max-h-[500px] overflow-y-auto px-2 hide-scrollbar overscroll-contain touch-pan-y"
               >
                 {queue.length === 0 ? (
                   <div className="flex flex-col text-center items-center justify-center pb-14">
@@ -233,16 +208,20 @@ export default function QueuePanel({ isOpen, onClose }: QueuePanelProps) {
                       droppableId="queue"
                       renderClone={(provided, _snapshot, rubric) => {
                         const track = queue[rubric.source.index];
-                        return (
+                        return createPortal(
                           <div
                             ref={provided.innerRef}
                             {...provided.draggableProps}
                             {...provided.dragHandleProps}
-                            className="relative flex items-center justify-between gap-3 rounded-2xl p-3 bg-(--bg-2) shadow-lg ring-1 ring-(--control-border) text-(--text-0) cursor-grabbing"
+                            className="relative flex items-center justify-between gap-3 rounded-2xl p-3 bg-(--bg-2)/75 shadow-2xl ring-1 ring-(--control-border) text-(--text-0) backdrop-blur-xl cursor-grabbing"
                             style={{
                               ...provided.draggableProps.style,
-                              width: "calc(min(100vw - 1rem, 800px) - 20px)",
+                              width: queueContentRef.current
+                                ? `${queueContentRef.current.clientWidth - 16}px`
+                                : "calc(100% - 16px)",
                               maxWidth: "780px",
+                              boxSizing: "border-box",
+                              zIndex: 100005,
                             }}
                           >
                             <div className="flex min-w-0 flex-1 items-center justify-start gap-4">
@@ -261,7 +240,13 @@ export default function QueuePanel({ isOpen, onClose }: QueuePanelProps) {
                                 </span>
                               </div>
                             </div>
-                          </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <div className="flex h-7 w-7 items-center justify-center rounded-lg text-white/70">
+                                <GripVertical className="size-4" />
+                              </div>
+                            </div>
+                          </div>,
+                          document.body,
                         );
                       }}
                     >
@@ -281,14 +266,11 @@ export default function QueuePanel({ isOpen, onClose }: QueuePanelProps) {
                                 <div
                                   ref={provided.innerRef}
                                   {...provided.draggableProps}
-                                  {...provided.dragHandleProps}
-                                  className={`relative flex w-full items-center justify-between gap-3 rounded-2xl p-3 mb-1 bg-white/5 hover:bg-white/10 transition-colors group cursor-grab active:cursor-grabbing ${
-                                    snapshot.isDragging ? "opacity-50" : ""
-                                  }`}
-                                  style={{
-                                    ...provided.draggableProps.style,
-                                    touchAction: "none",
-                                  }}
+                                  className={cn(
+                                    "relative flex w-full items-center justify-between gap-3 rounded-2xl p-3 mb-1 bg-(--action-bg) hover:bg-(--action-bg-hover) transition-colors group",
+                                    snapshot.isDragging && "opacity-50 z-50",
+                                  )}
+                                  style={provided.draggableProps.style}
                                 >
                                   <div className="flex min-w-0 flex-1 items-center justify-start gap-4">
                                     <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded-lg bg-[#333333] border border-[rgba(53,51,51,0.2)]">
@@ -313,7 +295,7 @@ export default function QueuePanel({ isOpen, onClose }: QueuePanelProps) {
                                     </div>
                                   </div>
 
-                                  <div className="shrink-0">
+                                  <div className="flex items-center gap-1 shrink-0">
                                     <DropdownMenu
                                       open={openMenuIndex === index}
                                       onOpenChange={(open) =>
@@ -322,9 +304,11 @@ export default function QueuePanel({ isOpen, onClose }: QueuePanelProps) {
                                     >
                                       <DropdownMenuTrigger asChild>
                                         <Button
+                                          type="button"
                                           variant="ghost"
                                           size="icon-sm"
                                           className="h-7 w-7 shrink-0 rounded-lg hover:bg-white/10 transition-all opacity-70 hover:opacity-100"
+                                          onPointerDown={(e) => e.stopPropagation()}
                                           onClick={(e) => e.stopPropagation()}
                                         >
                                           <MoreHorizontal className="size-4" />
@@ -332,7 +316,7 @@ export default function QueuePanel({ isOpen, onClose }: QueuePanelProps) {
                                       </DropdownMenuTrigger>
                                       <DropdownMenuContent
                                         align="end"
-                                        className="w-48 border-muted bg-background z-1001"
+                                        className="w-48 border-muted bg-background z-[10005]"
                                       >
                                         <DropdownMenuItem
                                           onSelect={() =>
@@ -353,11 +337,19 @@ export default function QueuePanel({ isOpen, onClose }: QueuePanelProps) {
                                             handleRemoveTrack(index)
                                           }
                                         >
-                                          <X className="ml-1 mr-1.5 size-4.5" />
+                                          <X className="ml-1 mr-1.5 size-4.5 text-red-500!" />
                                           Remove from queue
                                         </DropdownMenuItem>
                                       </DropdownMenuContent>
                                     </DropdownMenu>
+
+                                    <div
+                                      {...provided.dragHandleProps}
+                                      aria-label={`Reorder ${track.title}`}
+                                      className="flex h-7 w-7 items-center justify-center rounded-lg text-white/40 hover:text-white hover:bg-white/10 active:text-white cursor-grab active:cursor-grabbing touch-none select-none transition-colors"
+                                    >
+                                      <GripVertical className="size-4" />
+                                    </div>
                                   </div>
                                 </div>
                               )}
@@ -369,7 +361,7 @@ export default function QueuePanel({ isOpen, onClose }: QueuePanelProps) {
                     </Droppable>
                   </DragDropContext>
                 )}
-              </motion.div>
+              </div>
             </div>
           </motion.div>
         </>

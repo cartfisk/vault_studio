@@ -1,4 +1,5 @@
 import type React from "react";
+import { gaplessDebug } from "../lib/playback/gaplessDebug";
 import {
   createContext,
   useContext,
@@ -24,6 +25,20 @@ import {
   isPreloadStale,
   shouldStartPreload,
 } from "../lib/gaplessPreload";
+import {
+  codecsParam,
+  supportedLosslessCodecs,
+} from "../lib/playback/codecSupport";
+import {
+  canAppendNext,
+  selectEngine,
+  type EngineKind,
+} from "../lib/playback/selectEngine";
+import type {
+  GaplessManifest,
+  PlayableTrack,
+  PlaybackEngine,
+} from "../lib/playback/types";
 
 interface Track {
   id: string;
@@ -53,7 +68,39 @@ export interface NextTrackPreload {
   url: string;
   /** Date.now() at signing time, used to detect expiry before swap. */
   signedAt: number;
+  /**
+   * Present only when the server offered a lossless rendition for this
+   * track. Carried so the preload path can decide whether the next track
+   * could join the current timeline rather than force a swap.
+   */
+  manifest?: GaplessManifest | null;
+  /** Which engine this track resolved to, given the manifest above and what
+   *  this browser can decode. */
+  engine: EngineKind;
 }
+
+/**
+ * What the context is allowed to talk to. Deliberately narrower than a raw
+ * media element: every time value here is TRACK-relative, so no caller can
+ * accidentally read a shared-timeline absolute value.
+ *
+ * `kind` and `getPlaybackRate` are not part of `PlaybackEngine`; they are
+ * supplied by the facade MusicPlayer publishes. `kind` is the engine actually
+ * driving playback (after any runtime MSE latch); `getPlaybackRate` only
+ * feeds MediaSession position state.
+ */
+type ContextEngine = Pick<
+  PlaybackEngine,
+  | "play"
+  | "pause"
+  | "getTrackTime"
+  | "getTrackDuration"
+  | "seekToTrackTime"
+  | "canAppend"
+  | "prepareNext"
+  | "discardNext"
+  | "teardown"
+> & { kind: EngineKind; getPlaybackRate?: () => number };
 
 interface AudioPlayerContextType {
   currentTrack: Track | null;
@@ -65,6 +112,13 @@ interface AudioPlayerContextType {
   currentProjectTracks: Track[];
   shuffledProjectTracks: Track[];
   audioUrl: string | null;
+  /**
+   * The current track as an engine sees it: the same `audioUrl` plus the
+   * manifest that decides whether it can play losslessly. Published so
+   * MusicPlayer can route the track to the MSE engine without re-signing or
+   * re-deriving anything. Null before the first track is minted.
+   */
+  currentPlayable: PlayableTrack | null;
   nextTrackPreload: NextTrackPreload | null;
   play: (
     track: Track,
@@ -106,7 +160,6 @@ const AudioPlayerContext = createContext<AudioPlayerContextType | undefined>(
 );
 
 const QUEUE_STORAGE_KEY = "audioPlayerQueue";
-const DEFAULT_AUDIO_QUALITY = "lossy";
 
 export function AudioPlayerProvider({
   children,
@@ -120,6 +173,8 @@ export function AudioPlayerProvider({
   const [previewProgress, setPreviewProgress] = useState(0);
   const [isNowPlayingOpen, setIsNowPlayingOpen] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [currentPlayable, setCurrentPlayable] =
+    useState<PlayableTrack | null>(null);
   const [nextTrackPreload, setNextTrackPreload] =
     useState<NextTrackPreload | null>(null);
   /**
@@ -137,6 +192,9 @@ export function AudioPlayerProvider({
    * latching it off.
    */
   const preloadKeyRef = useRef<string | null>(null);
+  /** The track `prepareNext` appended to the live timeline, until it becomes
+   *  current. Lets the preload effect retract it if "next" changes first. */
+  const appendedNextIdRef = useRef<string | null>(null);
   const [loopMode, setLoopMode] = useState<LoopMode>("off");
   const [isShuffled, setIsShuffled] = useState(false);
   const shareTokenRef = useRef<string | null>(null);
@@ -155,9 +213,28 @@ export function AudioPlayerProvider({
     [],
   );
   const audioPlayerRef = useRef<any>(null);
+  /**
+   * The engine currently driving playback, or null before MusicPlayer has
+   * mounted and published one. Every reach for transport or time goes
+   * through here; the context never touches a media element.
+   */
+  const getEngine = useCallback((): ContextEngine | null => {
+    const engine = audioPlayerRef.current;
+    return engine && typeof engine.getTrackTime === "function"
+      ? (engine as ContextEngine)
+      : null;
+  }, []);
   const playRequestIdRef = useRef(0);
   const { preferences } = usePreferences();
-  const qualityPreference = preferences?.default_quality || DEFAULT_AUDIO_QUALITY;
+  /**
+   * Only used to re-arm the preload when the user toggles quality. The
+   * stream request itself never carries a quality: `resolveQuality` on the
+   * server applies project override, then the stored preference, then
+   * lossy. Sending a client-side guess raced the preference fetch (a cold
+   * start asked for lossy and lost the gapless manifest for the first
+   * track) and silently overrode the project-level setting.
+   */
+  const qualityPreference = preferences?.default_quality ?? null;
   const [shareTokenVersion, setShareTokenVersion] = useState(0);
   const waveformCacheRef = useRef<Record<string, string | null>>({});
 
@@ -328,13 +405,12 @@ export function AudioPlayerProvider({
 
       setCurrentTrack(trackToPlay);
 
-      const quality = qualityPreference;
-
       if (playRequestIdRef.current !== requestId) {
         return;
       }
 
       let streamUrl: string;
+      let manifest: GaplessManifest | null = null;
 
       if (shareTokenRef.current) {
         streamUrl = resolveApiUrl(
@@ -350,13 +426,22 @@ export function AudioPlayerProvider({
 
         if (preloadMatches && preload) {
           streamUrl = preload.url;
+          // Carry the preload's manifest along. Dropping it here would
+          // silently downgrade a track the preload had already resolved as
+          // gapless-capable.
+          manifest = preload.manifest ?? null;
         } else {
           try {
+            const codecs = codecsParam();
             const signed = await getStreamUrl(trackToPlay.id, {
-              quality,
               versionId: trackToPlay.versionId ?? undefined,
+              // Omitted entirely when null: a present-but-empty `codecs`
+              // opts into the server's gapless branch, which a browser that
+              // can decode nothing lossless must not do.
+              ...(codecs ? { codecs } : {}),
             });
             streamUrl = resolveApiUrl(signed.url);
+            manifest = signed.gapless ?? null;
           } catch (error) {
             console.error("[AudioPlayer] Failed to get signed stream URL", error);
             return;
@@ -364,6 +449,12 @@ export function AudioPlayerProvider({
         }
       }
 
+      setCurrentPlayable({
+        trackId: trackToPlay.id,
+        versionId: trackToPlay.versionId ?? null,
+        url: streamUrl,
+        manifest,
+      });
       setAudioUrl(streamUrl);
       setIsPlaying(autoPlay);
     },
@@ -372,30 +463,28 @@ export function AudioPlayerProvider({
 
   const pause = useCallback(() => {
     setIsPlaying(false);
-    if (audioPlayerRef.current?.audio?.current) {
-      audioPlayerRef.current.audio.current.pause();
-    }
-  }, []);
+    getEngine()?.pause();
+  }, [getEngine]);
 
   const resume = useCallback(() => {
     setIsPlaying(true);
-    if (audioPlayerRef.current?.audio?.current) {
-      audioPlayerRef.current.audio.current.play();
-    }
-  }, []);
+    void getEngine()?.play();
+  }, [getEngine]);
 
   const stop = useCallback(() => {
     setIsPlaying(false);
     setIsNowPlayingOpen(false);
     setCurrentTrack(null);
     setAudioUrl(null);
+    setCurrentPlayable(null);
     setDuration(0);
     setPreviewProgress(0);
-    if (audioPlayerRef.current?.audio?.current) {
-      audioPlayerRef.current.audio.current.pause();
-      audioPlayerRef.current.audio.current.currentTime = 0;
+    const engine = getEngine();
+    if (engine) {
+      engine.pause();
+      engine.seekToTrackTime(0);
     }
-  }, []);
+  }, [getEngine]);
 
   const openNowPlaying = useCallback(() => setIsNowPlayingOpen(true), []);
   const closeNowPlaying = useCallback(() => setIsNowPlayingOpen(false), []);
@@ -467,11 +556,15 @@ export function AudioPlayerProvider({
     const DOUBLE_TAP_THRESHOLD = 1500;
     const recentlyRestarted =
       now - lastRestartTimeRef.current < DOUBLE_TAP_THRESHOLD;
-    const currentTime =
-      audioPlayerRef.current?.audio?.current?.currentTime ?? 0;
+    // TRACK-relative, never the element's `currentTime`. Under MSE every
+    // track after the first sits at a large absolute timeline offset, so a
+    // raw read is always > 3 and the back button would silently degrade into
+    // "restart the track", never reaching the previous one.
+    const engine = getEngine();
+    const currentTime = engine?.getTrackTime() ?? 0;
 
     if (!recentlyRestarted && currentTime > 3) {
-      audioPlayerRef.current.audio.current.currentTime = 0;
+      engine?.seekToTrackTime(0);
       lastRestartTimeRef.current = now;
       return;
     }
@@ -498,8 +591,8 @@ export function AudioPlayerProvider({
       }
     }
 
-    if (audioPlayerRef.current?.audio?.current) {
-      audioPlayerRef.current.audio.current.currentTime = 0;
+    if (engine) {
+      engine.seekToTrackTime(0);
       lastRestartTimeRef.current = now;
     }
   }, [
@@ -508,15 +601,20 @@ export function AudioPlayerProvider({
     shuffledProjectTracks,
     isShuffled,
     play,
+    getEngine,
   ]);
 
-  const seekTo = useCallback((time: number) => {
-    if (audioPlayerRef.current?.audio?.current) {
-      audioPlayerRef.current.audio.current.currentTime = time;
-    } else {
-      console.error("[AudioPlayer] Audio ref not available for seeking");
-    }
-  }, []);
+  const seekTo = useCallback(
+    (time: number) => {
+      const engine = getEngine();
+      if (engine) {
+        engine.seekToTrackTime(time);
+      } else {
+        console.error("[AudioPlayer] Audio ref not available for seeking");
+      }
+    },
+    [getEngine],
+  );
 
   const onEnded = useCallback(() => {
     if (loopMode === "track") {
@@ -831,15 +929,20 @@ export function AudioPlayerProvider({
 
     if (hasNativeMediaSession) {
       const updateNativePosition = () => {
-        const audio = audioPlayerRef.current?.audio?.current;
-        if (!audio || Number.isNaN(audio.duration) || audio.duration <= 0) {
+        // Track-relative, not element-absolute: under MSE the element's
+        // `duration` is the shared timeline's and GROWS as tracks are
+        // appended, which would show a lock-screen total that keeps moving.
+        const engine = getEngine();
+        if (!engine) return;
+        const trackDuration = engine.getTrackDuration();
+        if (Number.isNaN(trackDuration) || trackDuration <= 0) {
           return;
         }
 
         void NativeMediaSession.setPositionState({
-          duration: audio.duration,
-          playbackRate: audio.playbackRate,
-          position: audio.currentTime,
+          duration: trackDuration,
+          playbackRate: engine.getPlaybackRate?.() ?? 1,
+          position: engine.getTrackTime(),
         }).catch((error) => {
           console.error(
             "[Native Media Session] Failed to set position:",
@@ -856,15 +959,16 @@ export function AudioPlayerProvider({
     if (!("mediaSession" in navigator)) return;
 
     const updatePosition = () => {
-      if (!audioPlayerRef.current?.audio?.current) return;
+      const engine = getEngine();
+      if (!engine) return;
 
-      const audio = audioPlayerRef.current.audio.current;
-      if (!Number.isNaN(audio.duration) && audio.duration > 0) {
+      const trackDuration = engine.getTrackDuration();
+      if (!Number.isNaN(trackDuration) && trackDuration > 0) {
         try {
           navigator.mediaSession.setPositionState({
-            duration: audio.duration,
-            playbackRate: audio.playbackRate,
-            position: audio.currentTime,
+            duration: trackDuration,
+            playbackRate: engine.getPlaybackRate?.() ?? 1,
+            position: engine.getTrackTime(),
           });
         } catch (error) {
           console.error("[Media Session] Position state not supported:", error);
@@ -878,7 +982,7 @@ export function AudioPlayerProvider({
     return () => {
       clearInterval(interval);
     };
-  }, [currentTrack, duration]);
+  }, [currentTrack, duration, getEngine]);
 
   const getNextTrack = useCallback((): Track | null => {
     if (!currentTrack) return null;
@@ -927,6 +1031,16 @@ export function AudioPlayerProvider({
     duration,
   });
 
+  // Declared before the preload effect so that, on the commit where the
+  // appended track becomes current, the preload effect sees a cleared ref
+  // and does not retract the track now playing.
+  useEffect(() => {
+    setNextTrackPreload(null);
+    preloadKeyRef.current = null;
+    // The appended track is the current one now; nothing left to retract.
+    appendedNextIdRef.current = null;
+  }, [currentTrack?.id]);
+
   useEffect(() => {
     if (!isPlaying || !currentTrack) return;
     // Native looping means `ended` never fires, so there is nothing to preload.
@@ -935,9 +1049,35 @@ export function AudioPlayerProvider({
 
     const next = getNextTrack();
     if (!next) {
+      // The queue emptied after an append: nothing should follow now.
+      if (appendedNextIdRef.current) {
+        if (gaplessDebug()) {
+          console.info("[gapless] discardNext", {
+            stale: appendedNextIdRef.current,
+            next: null,
+          });
+        }
+        getEngine()?.discardNext();
+        appendedNextIdRef.current = null;
+      }
       setNextTrackPreload(null);
       preloadKeyRef.current = null;
       return;
+    }
+
+    // A track was appended to the live timeline for a next that is no longer
+    // next (queue reorder/remove, shuffle toggle). Retract it before anything
+    // else, or the boundary plays the stale track.
+    if (appendedNextIdRef.current && appendedNextIdRef.current !== next.id) {
+      if (gaplessDebug()) {
+        console.info("[gapless] discardNext", {
+          stale: appendedNextIdRef.current,
+          next: next.id,
+        });
+      }
+      getEngine()?.discardNext();
+      appendedNextIdRef.current = null;
+      preloadKeyRef.current = null;
     }
 
     const key = `${currentTrack.id}:${next.id}:${qualityPreference}`;
@@ -957,25 +1097,75 @@ export function AudioPlayerProvider({
 
       try {
         let url: string;
+        let manifest: GaplessManifest | null = null;
 
         if (shareTokenRef.current) {
           url = resolveApiUrl(
             `/api/share/${shareTokenRef.current}/stream/${next.id}`,
           );
         } else {
+          const codecs = codecsParam();
           const signed = await getStreamUrl(next.id, {
-            quality: qualityPreference,
             versionId: next.versionId ?? undefined,
+            // Omitted entirely when null — see the note in `play()`.
+            ...(codecs ? { codecs } : {}),
           });
           url = resolveApiUrl(signed.url);
+          manifest = signed.gapless ?? null;
         }
 
         if (cancelled) return;
+
+        const nextEngineKind = selectEngine({
+          manifest,
+          supported: supportedLosslessCodecs(),
+        });
+        const playable: PlayableTrack = {
+          trackId: next.id,
+          versionId: next.versionId ?? null,
+          url,
+          manifest,
+        };
+
+        const engine = getEngine();
+        // Append only when BOTH sides agree: the pure selection says this is
+        // an MSE-to-MSE transition, and the live engine confirms it can take
+        // the track. Anything else is a handoff — the outgoing engine is torn
+        // down and the incoming one loads, which costs the seam the lossy
+        // tier has always had. A seam is today's behaviour; guessing wrong
+        // here is silence.
+        const append =
+          canAppendNext(engine?.kind ?? "elementPair", nextEngineKind) &&
+          (engine?.canAppend(playable) ?? false);
+
+        if (gaplessDebug()) {
+          console.info("[gapless] preload", {
+            append,
+            engineKind: engine?.kind ?? null,
+            nextEngineKind,
+            nextTrackId: next.id,
+            nextHasManifest: !!manifest,
+          });
+        }
+
+        if (append) {
+          // Marked before the await: `prepareNext` places the track
+          // synchronously, so it is on the timeline even if this run is
+          // cancelled while the promise settles.
+          appendedNextIdRef.current = next.id;
+          await engine?.prepareNext(playable);
+        }
+
+        // Published either way. On the append path it is what lets `play()`
+        // reuse the already-minted URL instead of re-signing; on the handoff
+        // path it is also what drives the element-pair standby buffering.
         setNextTrackPreload({
           trackId: next.id,
           versionId: next.versionId ?? null,
           url,
           signedAt: Date.now(),
+          manifest,
+          engine: nextEngineKind,
         });
       } catch (error) {
         console.error("[AudioPlayer] Failed to preload next track:", error);
@@ -996,6 +1186,7 @@ export function AudioPlayerProvider({
     isAuthenticated,
     getNextTrack,
     ensureTrackWaveform,
+    getEngine,
   ]);
 
   // The user can pause inside the preload window and come back after the
@@ -1011,25 +1202,16 @@ export function AudioPlayerProvider({
   }, [isPlaying, nextTrackPreload]);
 
   useEffect(() => {
-    setNextTrackPreload(null);
-    preloadKeyRef.current = null;
-  }, [currentTrack?.id]);
-
-  useEffect(() => {
     if (!isAuthenticated) {
       setIsPlaying(false);
       // Tear down BOTH elements. The standby can be holding a fully buffered
       // signed stream belonging to the account that just signed out, and it
       // would otherwise stay resident until some later preload overwrote it.
-      if (typeof audioPlayerRef.current?.teardown === "function") {
-        audioPlayerRef.current.teardown();
-      } else if (audioPlayerRef.current?.audio?.current) {
-        audioPlayerRef.current.audio.current.pause();
-        audioPlayerRef.current.audio.current.src = "";
-      }
+      getEngine()?.teardown();
 
       setCurrentTrack(null);
       setAudioUrl(null);
+      setCurrentPlayable(null);
       setNextTrackPreload(null);
       preloadKeyRef.current = null;
       setDuration(0);
@@ -1049,7 +1231,7 @@ export function AudioPlayerProvider({
 
       setShareTokenVersion((version) => version + 1);
     }
-  }, [isAuthenticated, clearQueue]);
+  }, [isAuthenticated, clearQueue, getEngine]);
 
   return (
     <AudioPlayerContext.Provider
@@ -1063,6 +1245,7 @@ export function AudioPlayerProvider({
         currentProjectTracks,
         shuffledProjectTracks,
         audioUrl,
+        currentPlayable,
         nextTrackPreload,
         play,
         pause,

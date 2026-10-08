@@ -83,8 +83,10 @@ export interface NextTrackPreload {
  * media element: every time value here is TRACK-relative, so no caller can
  * accidentally read a shared-timeline absolute value.
  *
- * `getPlaybackRate` is not part of `PlaybackEngine`; it is supplied by the
- * facade MusicPlayer publishes and only feeds MediaSession position state.
+ * `kind` and `getPlaybackRate` are not part of `PlaybackEngine`; they are
+ * supplied by the facade MusicPlayer publishes. `kind` is the engine actually
+ * driving playback (after any runtime MSE latch); `getPlaybackRate` only
+ * feeds MediaSession position state.
  */
 type ContextEngine = Pick<
   PlaybackEngine,
@@ -96,7 +98,7 @@ type ContextEngine = Pick<
   | "canAppend"
   | "prepareNext"
   | "teardown"
-> & { getPlaybackRate?: () => number };
+> & { kind: EngineKind; getPlaybackRate?: () => number };
 
 interface AudioPlayerContextType {
   currentTrack: Track | null;
@@ -217,9 +219,6 @@ export function AudioPlayerProvider({
       ? (engine as ContextEngine)
       : null;
   }, []);
-  /** Which engine the track that is playing right now resolved to. Read by
-   *  the preload trigger to decide append-vs-handoff. */
-  const currentEngineKindRef = useRef<EngineKind>("elementPair");
   const playRequestIdRef = useRef(0);
   const { preferences } = usePreferences();
   /**
@@ -444,11 +443,6 @@ export function AudioPlayerProvider({
           }
         }
       }
-
-      currentEngineKindRef.current = selectEngine({
-        manifest,
-        supported: supportedLosslessCodecs(),
-      });
 
       setCurrentPlayable({
         trackId: trackToPlay.id,
@@ -1100,7 +1094,7 @@ export function AudioPlayerProvider({
         // tier has always had. A seam is today's behaviour; guessing wrong
         // here is silence.
         const append =
-          canAppendNext(currentEngineKindRef.current, nextEngineKind) &&
+          canAppendNext(engine?.kind ?? "elementPair", nextEngineKind) &&
           (engine?.canAppend(playable) ?? false);
 
         if (append) {

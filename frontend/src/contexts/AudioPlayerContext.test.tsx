@@ -91,6 +91,7 @@ const MANIFEST = {
 /** A fake engine standing in for the facade MusicPlayer publishes. */
 function fakeEngine(trackTime: number, canAppend = true) {
 	return {
+		kind: "mse" as "mse" | "elementPair",
 		// Present so the context recognises this as engine-shaped.
 		getTrackTime: vi.fn(() => trackTime),
 		getTrackDuration: vi.fn(() => 300),
@@ -241,6 +242,35 @@ describe("preload trigger engine selection", () => {
 		const engine = await runPreload({ gapless: true, canAppend: false });
 
 		expect(engine.canAppend).toHaveBeenCalled();
+		expect(engine.prepareNext).not.toHaveBeenCalled();
+		expect(ctx.nextTrackPreload?.trackId).toBe("t2");
+	});
+
+	it("hands off when MusicPlayer reports the element pair, even with a manifest", async () => {
+		// MusicPlayer latches mseDisabled after a runtime failure. The context
+		// must follow what is actually playing, not its own memory of the
+		// manifest it saw at play() time.
+		codecSupport.codecs = "alac";
+		codecSupport.supported = ["alac"];
+		apis.getStreamUrl.mockResolvedValue({ url: "/api/stream/x", gapless: MANIFEST });
+		mount();
+		const engine = { ...fakeEngine(5, true), kind: "elementPair" as const };
+
+		await act(async () => {
+			await ctx.play(TRACKS[0], TRACKS, true);
+		});
+		act(() => {
+			ctx.audioPlayerRef.current = engine;
+		});
+		await act(async () => {
+			ctx.onDurationChange(100);
+			ctx.onProgressUpdate(95);
+		});
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+
 		expect(engine.prepareNext).not.toHaveBeenCalled();
 		expect(ctx.nextTrackPreload?.trackId).toBe("t2");
 	});

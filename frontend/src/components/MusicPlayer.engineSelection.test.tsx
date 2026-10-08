@@ -351,4 +351,43 @@ describe("MusicPlayer engine selection", () => {
 		);
 		error.mockRestore();
 	});
+
+	it("never touches the MSE element's srcObject once an engine owns it", async () => {
+		codecSupport.supported = ["alac"];
+		store.set({
+			currentPlayable: { trackId: "t1", versionId: null, url: TRACK_A_URL, manifest: MANIFEST },
+		});
+		const { container } = render(<MusicPlayer hideControls />);
+		await act(async () => {});
+		const { elMse } = audioElements(container);
+		const live = {};
+		Object.defineProperty(elMse, "srcObject", { value: live, writable: true, configurable: true });
+
+		await act(async () => {
+			document.dispatchEvent(new Event("pointerdown"));
+		});
+
+		expect(elMse.srcObject).toBe(live);
+	});
+
+	it("marks the MSE element unlocked at the play() call, even when play() rejects", async () => {
+		const { container } = render(<MusicPlayer hideControls />);
+		await act(async () => {});
+		const { elMse } = audioElements(container);
+		Object.defineProperty(elMse, "srcObject", { value: null, writable: true, configurable: true });
+		// The engine's load() replaces srcObject, which aborts the pending play().
+		const play = vi
+			.spyOn(elMse, "play")
+			.mockRejectedValue(new DOMException("aborted", "AbortError"));
+
+		await act(async () => {
+			document.dispatchEvent(new Event("pointerdown"));
+		});
+		expect(play).toHaveBeenCalledTimes(1);
+		await act(async () => {
+			document.dispatchEvent(new Event("pointerdown"));
+		});
+
+		expect(play).toHaveBeenCalledTimes(1);
+	});
 });

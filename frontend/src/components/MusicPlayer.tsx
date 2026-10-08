@@ -467,12 +467,11 @@ export default function MusicPlayer({
    * so unlocking it lazily at the first lossless track means that track
    * silently never plays.
    *
-   * Unlike the standby, no silent data URI is needed — attaching a
-   * `MediaSource` via `srcObject` is itself enough to make `play()`
-   * resolvable. The gesture is still required, so this attaches a throwaway
-   * `MediaSource` (never the real gapless one; `mseEngine.load()` attaches
-   * its own later) and plays it muted, synchronously inside the gesture
-   * stack, mirroring `unlockStandbyElement` above.
+   * Unlike the standby, no silent data URI is needed. This attaches a
+   * throwaway `MediaSource` (never the real gapless one; `mseEngine.load()`
+   * attaches its own later) and plays it muted, synchronously inside the
+   * gesture stack, mirroring `unlockStandbyElement` above. That `play()`
+   * promise never resolves, so the element counts as unlocked at the call.
    *
    * If this browser has no MediaSource/ManagedMediaSource implementation at
    * all, there is nothing to unlock and no lossless track will ever route to
@@ -483,6 +482,10 @@ export default function MusicPlayer({
     if (mseUnlockedRef.current || mseUnlockInFlightRef.current) return;
     const el = mseElRef.current;
     if (!el) return;
+    // The engine owns the element from its first load() onward and plays it
+    // inside the user's own tap. Attaching anything here would replace the
+    // live timeline.
+    if (mseEngineRef.current) return;
 
     const w = window as unknown as {
       ManagedMediaSource?: typeof MediaSource;
@@ -494,21 +497,30 @@ export default function MusicPlayer({
     mseUnlockInFlightRef.current = true;
     const wasMuted = el.muted;
     el.muted = true;
-    (el as unknown as { srcObject: unknown }).srcObject = new MediaSourceImpl();
+    const throwaway = new MediaSourceImpl();
+    (el as unknown as { srcObject: unknown }).srcObject = throwaway;
 
-    el.play()
-      .then(() => {
-        el.pause();
-        mseUnlockedRef.current = true;
-      })
-      .catch((error) => {
-        // Leave mseUnlockedRef false so a later gesture retries, same as the
-        // standby element's failure path.
-        console.error("Failed to unlock MSE audio element:", error);
+    // iOS registers the gesture at the play() CALL. The promise itself can
+    // never resolve — a MediaSource with no SourceBuffer has nothing to play
+    // — so waiting on it is what kept this unlock from ever "succeeding".
+    const pending = el.play();
+    mseUnlockedRef.current = true;
+
+    pending
+      .catch(() => {
+        // AbortError when the engine takes the element over, or a sourceless
+        // play that the browser rejects. Either way the gesture was consumed.
       })
       .finally(() => {
         el.muted = wasMuted;
         mseUnlockInFlightRef.current = false;
+        // Only detach our own throwaway. If the engine has attached its
+        // MediaSource in the meantime, leave it.
+        const current = (el as unknown as { srcObject: unknown }).srcObject;
+        if (current === throwaway && !mseEngineRef.current) {
+          el.pause();
+          (el as unknown as { srcObject: unknown }).srcObject = null;
+        }
       });
   }, []);
 

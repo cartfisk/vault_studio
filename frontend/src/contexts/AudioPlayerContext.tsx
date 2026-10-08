@@ -156,7 +156,6 @@ const AudioPlayerContext = createContext<AudioPlayerContextType | undefined>(
 );
 
 const QUEUE_STORAGE_KEY = "audioPlayerQueue";
-const DEFAULT_AUDIO_QUALITY = "lossy";
 
 export function AudioPlayerProvider({
   children,
@@ -223,7 +222,15 @@ export function AudioPlayerProvider({
   const currentEngineKindRef = useRef<EngineKind>("elementPair");
   const playRequestIdRef = useRef(0);
   const { preferences } = usePreferences();
-  const qualityPreference = preferences?.default_quality || DEFAULT_AUDIO_QUALITY;
+  /**
+   * Only used to re-arm the preload when the user toggles quality. The
+   * stream request itself never carries a quality: `resolveQuality` on the
+   * server applies project override, then the stored preference, then
+   * lossy. Sending a client-side guess raced the preference fetch (a cold
+   * start asked for lossy and lost the gapless manifest for the first
+   * track) and silently overrode the project-level setting.
+   */
+  const qualityPreference = preferences?.default_quality ?? null;
   const [shareTokenVersion, setShareTokenVersion] = useState(0);
   const waveformCacheRef = useRef<Record<string, string | null>>({});
 
@@ -394,8 +401,6 @@ export function AudioPlayerProvider({
 
       setCurrentTrack(trackToPlay);
 
-      const quality = qualityPreference;
-
       if (playRequestIdRef.current !== requestId) {
         return;
       }
@@ -425,7 +430,6 @@ export function AudioPlayerProvider({
           try {
             const codecs = codecsParam();
             const signed = await getStreamUrl(trackToPlay.id, {
-              quality,
               versionId: trackToPlay.versionId ?? undefined,
               // Omitted entirely when null: a present-but-empty `codecs`
               // opts into the server's gapless branch, which a browser that
@@ -1067,7 +1071,6 @@ export function AudioPlayerProvider({
         } else {
           const codecs = codecsParam();
           const signed = await getStreamUrl(next.id, {
-            quality: qualityPreference,
             versionId: next.versionId ?? undefined,
             // Omitted entirely when null — see the note in `play()`.
             ...(codecs ? { codecs } : {}),

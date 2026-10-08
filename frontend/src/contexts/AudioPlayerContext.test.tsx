@@ -59,8 +59,12 @@ vi.mock("./AuthContext", () => ({
 	useAuth: () => ({ isAuthenticated: true }),
 }));
 
+const prefs = vi.hoisted(() => ({
+	value: { default_quality: "lossless" } as { default_quality: string } | null,
+}));
+
 vi.mock("./PreferencesContext", () => ({
-	usePreferences: () => ({ preferences: { default_quality: "lossless" } }),
+	usePreferences: () => ({ preferences: prefs.value, isLoading: false }),
 }));
 
 import { AudioPlayerProvider, useAudioPlayer } from "./AudioPlayerContext";
@@ -116,6 +120,7 @@ function mount() {
 
 beforeEach(() => {
 	localStorage.clear();
+	prefs.value = { default_quality: "lossless" };
 	codecSupport.codecs = null;
 	codecSupport.supported = [];
 	apis.getStreamUrl.mockReset();
@@ -238,6 +243,35 @@ describe("preload trigger engine selection", () => {
 		expect(engine.canAppend).toHaveBeenCalled();
 		expect(engine.prepareNext).not.toHaveBeenCalled();
 		expect(ctx.nextTrackPreload?.trackId).toBe("t2");
+	});
+});
+
+describe("quality parameter", () => {
+	it("never sends quality: the server resolves it from stored preferences", async () => {
+		prefs.value = { default_quality: "source" };
+		mount();
+
+		await act(async () => {
+			await ctx.play(TRACKS[0], TRACKS, false);
+		});
+
+		const params = apis.getStreamUrl.mock.calls[0][1];
+		expect("quality" in params).toBe(false);
+	});
+
+	it("still mints a URL before preferences have loaded", async () => {
+		// Cold start: preferences are null until the fetch resolves. Playing
+		// must not wait on them and must not guess a tier.
+		prefs.value = null;
+		mount();
+
+		await act(async () => {
+			await ctx.play(TRACKS[0], TRACKS, false);
+		});
+
+		expect(apis.getStreamUrl).toHaveBeenCalledTimes(1);
+		const params = apis.getStreamUrl.mock.calls[0][1];
+		expect("quality" in params).toBe(false);
 	});
 });
 

@@ -133,8 +133,17 @@ func (h *MediaHandler) gaplessManifest(r *http.Request, trackID, requestedQualit
 		return nil
 	}
 
+	// Gapless is offered for both lossless tiers. "source" counts because it
+	// implies lossless here by construction: TranscodeVersion only builds
+	// segment sets when IsLosslessCodec(sourceCodec) is true, so a completed
+	// set existing is itself proof the source was lossless. A lossy upload
+	// never gets a set, so it can never reach this branch.
+	//
+	// Excluding "source" made the feature unreachable for every user: the
+	// client's quality control is a two-way toggle between "source" and
+	// "lossy", and never offers "lossless" at all.
 	quality := resolveQuality(ctx, h.db, int64(userID), track.ID, requestedQuality)
-	if quality != "lossless" {
+	if quality != "lossless" && quality != "source" {
 		return nil
 	}
 
@@ -210,4 +219,24 @@ func (h *MediaHandler) ProjectCoverURL(w http.ResponseWriter, r *http.Request) e
 	}
 
 	return httputil.OKResult(w, map[string]string{"url": coverURL})
+}
+
+func (h *MediaHandler) ProjectMotionAssetURL(w http.ResponseWriter, r *http.Request) error {
+	userID, err := httputil.RequireUserID(r)
+	if err != nil {
+		return apperr.NewUnauthorized("unauthorized")
+	}
+	projectID := r.PathValue("id")
+	kind := r.PathValue("kind")
+	if projectID == "" || kind == "" {
+		return apperr.NewBadRequest("project id and motion artwork type are required")
+	}
+	query := url.Values{}
+	query.Set("user_id", strconv.Itoa(userID))
+	path := "/api/projects/" + projectID + "/motion-art/" + kind + "/preview"
+	signedURL, err := middleware.BuildSignedURL("", path, query, h.config.SignedURLSecret, h.config.SignedURLExpiration)
+	if err != nil {
+		return apperr.NewInternal("failed to build signed url", err)
+	}
+	return httputil.OKResult(w, map[string]string{"url": signedURL})
 }

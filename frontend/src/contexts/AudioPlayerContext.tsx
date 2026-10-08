@@ -103,6 +103,7 @@ interface AudioPlayerContextType {
   isPlaying: boolean;
   duration: number;
   previewProgress: number;
+  isNowPlayingOpen: boolean;
   queue: Track[];
   currentProjectTracks: Track[];
   shuffledProjectTracks: Track[];
@@ -124,6 +125,8 @@ interface AudioPlayerContextType {
   pause: () => void;
   resume: () => void;
   stop: () => void;
+  openNowPlaying: () => void;
+  closeNowPlaying: () => void;
   nextTrack: () => void;
   previousTrack: () => void;
   playFromQueue: () => void;
@@ -165,6 +168,7 @@ export function AudioPlayerProvider({
   const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
   const [previewProgress, setPreviewProgress] = useState(0);
+  const [isNowPlayingOpen, setIsNowPlayingOpen] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [currentPlayable, setCurrentPlayable] =
     useState<PlayableTrack | null>(null);
@@ -277,8 +281,6 @@ export function AudioPlayerProvider({
       originalQueueRef.current = [];
     }
   }, [isShuffled, currentTrack, currentProjectTracks]);
-
-
 
   const getWaveformCacheKey = useCallback((track: Track): string => {
     return `${track.id}:${track.versionId ?? "active"}`;
@@ -468,6 +470,7 @@ export function AudioPlayerProvider({
 
   const stop = useCallback(() => {
     setIsPlaying(false);
+    setIsNowPlayingOpen(false);
     setCurrentTrack(null);
     setAudioUrl(null);
     setCurrentPlayable(null);
@@ -479,6 +482,9 @@ export function AudioPlayerProvider({
       engine.seekToTrackTime(0);
     }
   }, [getEngine]);
+
+  const openNowPlaying = useCallback(() => setIsNowPlayingOpen(true), []);
+  const closeNowPlaying = useCallback(() => setIsNowPlayingOpen(false), []);
 
   const playFromQueue = useCallback(() => {
     if (queue.length === 0) return;
@@ -760,10 +766,9 @@ export function AudioPlayerProvider({
       if (!currentTrack) return;
 
       const artist =
-        (typeof currentTrack.artist === "string" &&
-        currentTrack.artist.trim().length > 0
-          ? currentTrack.artist
-          : "Unknown Artist");
+        (typeof currentTrack.artist === "string" && currentTrack.artist.trim()) ||
+        currentTrack.projectName?.trim() ||
+        "{ vault.studio }";
       const artworkUrl = resolveApiMediaUrl(currentTrack.projectCoverUrl);
 
       void NativeMediaSession.setMetadata({
@@ -794,10 +799,9 @@ export function AudioPlayerProvider({
     const metadata = {
       title: currentTrack.title || "Unknown Track",
       artist:
-        (typeof currentTrack.artist === "string" &&
-        currentTrack.artist.trim().length > 0
-          ? currentTrack.artist
-          : "Unknown Artist"),
+        (typeof currentTrack.artist === "string" && currentTrack.artist.trim()) ||
+        currentTrack.projectName?.trim() ||
+        "{ vault.studio }",
       album: currentTrack.projectName ?? "{ vault.studio }",
       ...(artwork && { artwork }),
     };
@@ -1189,6 +1193,7 @@ export function AudioPlayerProvider({
         isPlaying,
         duration,
         previewProgress,
+        isNowPlayingOpen,
         queue,
         currentProjectTracks,
         shuffledProjectTracks,
@@ -1199,6 +1204,8 @@ export function AudioPlayerProvider({
         pause,
         resume,
         stop,
+        openNowPlaying,
+        closeNowPlaying,
         nextTrack,
         previousTrack,
         playFromQueue,
